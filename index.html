@@ -409,6 +409,7 @@ import dompurify from 'dompurify';
 import { marked } from 'marked';
 
 // API proxys
+const wsProto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
 const jwtEndpoint = "/app/jwt/get"; // Get JSON Web Token for Single Sign-On
 const openaiChatCompletionsProxy = "/openai/v1/chat/completions";
 const openaiModerationsProxy = "/openai/v1/moderations";
@@ -416,12 +417,12 @@ const openaiAudioTranscriptionsProxy = "/openai/v1/audio/transcriptions";
 const geminiProxy = "/gemini/";
 const googleTTSProxy = "/gtts/";
 const elevenTTSProxy = [
-  "wss://" + window.location.host + "/elevenlabs/",
+  wsProto + window.location.host + "/elevenlabs/",
   "/v1/text-to-speech/",
   "/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_22050&auto_mode=true&apply_text_normalization=off"
 ];
 const microsoftTTSProxy = [
-  "wss://" + window.location.host + "/mstts/",
+  wsProto + window.location.host + "/mstts/",
   "/cognitiveservices/websocket/v1"
 ];
 const grokChatCompletionsProxy = "/grok/v1/chat/completions"; // Grok-beta
@@ -1777,8 +1778,14 @@ async function openaiSendMessage(node,msgs) {
                   fn.id += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.id || '';
                   fn.name += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name || '';
                   fn.arguments += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments || '';
-                  node.dataset.output += obj?.choices?.[0]?.delta?.content || '';
-                  tts += obj?.choices?.[0]?.delta?.content || '';
+
+                  // Append streamed text to UI incrementally
+                  const piece = obj?.choices?.[0]?.delta?.content || '';
+                  if (piece && node) {
+                    try { addText(node, piece); } catch(e) { /* ignore */ }
+                  }
+                  node.dataset.output += piece;
+                  tts += piece;
 
                 }
               }
@@ -3735,11 +3742,27 @@ document.addEventListener('DOMContentLoaded', async function(e) {
   // Translate
   i18nTranslate();
 
+  // Force default TTS provider to ElevenLabs at startup
+  try {
+    cfg('voice-type','eleven');
+    // Ensure a default ElevenLabs voice ID is set
+    if (!cfg('voice-eleven-id') || (typeof cfg('voice-eleven-id') === 'string' && cfg('voice-eleven-id').length === 0)) {
+      const firstEleven = Object.values(site.elevenVoices || {})[0];
+      if (firstEleven && firstEleven.id) cfg('voice-eleven-id', firstEleven.id);
+    }
+    // Sync UI state by simulating a click on the ElevenLabs button (ensures internal handlers run)
+    const elBtn = document.querySelector('[data-item="voice-type"][data-voice-type="eleven"]');
+    if (elBtn) {
+      elBtn.click();
+    }
+  } catch (e) { console.warn('Failed to set default ElevenLabs config', e); }
+
   // Create the talking head avatar
   const nodeAvatar = document.getElementById('avatar');
   head = new TalkingHead( nodeAvatar, {
     jwtGet: jwtGet,
-    ttsEndpoint: googleTTSProxy,
+    // Prevent Google TTS by default; ElevenLabs path uses WebSocket
+    ttsEndpoint: null,
     cameraZoomEnable: true,
     cameraPanEnable: true,
     cameraView: 'full',
@@ -3750,6 +3773,27 @@ document.addEventListener('DOMContentLoaded', async function(e) {
     statsStyle: "position: fixed; bottom: 0px; left: 0px; cursor: pointer; opacity: 0.9; z-index: 10000;"
   });
   window.head = head;
+
+  // SAFETY NET: route speakText to the selected provider
+  try {
+    const _origSpeakText = head.speakText.bind(head);
+    head.speakText = async function(s, opt = {}, onsubtitles = null, excludes = []) {
+      const vt = cfg('voice-type');
+      const isGoogle = (vt === 'google');
+      const hasGtts = !!this?.ttsEndpoint; // if TalkingHead was instantiated with a valid Google endpoint
+      // Route to ElevenLabs unless Google is explicitly selected AND a valid Google endpoint exists
+      if (!isGoogle || !hasGtts) {
+        if (vt === 'microsoft') {
+          await microsoftSpeak(s);
+          return;
+        }
+        await elevenSpeak(s);
+        return;
+      }
+      // Only if Google explicitly selected and endpoint configured
+      return await _origSpeakText(s, opt, onsubtitles, excludes);
+    };
+  } catch (e) { console.warn('Failed to patch speakText routing', e); }
 
   // Follow double clicks
   document.body.addEventListener('dblclick', function(e) {
@@ -4404,6 +4448,19 @@ document.addEventListener('DOMContentLoaded', async function(e) {
     d3.select("#lipsync").style("display", (e.attr("data-voice-type") !== 'microsoft') ? "flex" : "none" );
     d3.select("#excludes").style("display", (e.attr("data-voice-type") === 'google') ? "flex" : "none" );
   });
+
+  // Enforce ElevenLabs selection after handlers are in place
+  try {
+    const btnEleven = document.querySelector('[data-item="voice-type"][data-voice-type="eleven"]');
+    if (btnEleven && !btnEleven.classList.contains('selected')) {
+      btnEleven.click();
+    }
+    // Ensure cfg has a valid Eleven voice id
+    if (!cfg('voice-eleven-id') || (typeof cfg('voice-eleven-id') === 'string' && cfg('voice-eleven-id').length === 0)) {
+      const firstEleven = Object.values(site.elevenVoices || {})[0];
+      if (firstEleven && firstEleven.id) cfg('voice-eleven-id', firstEleven.id);
+    }
+  } catch (e) { /* ignore */ }
 
   d3.selectAll("[data-voice-google-id]").on('click.command', function(ev) {
     const e = d3.select(this);
@@ -6037,9 +6094,9 @@ document.addEventListener('DOMContentLoaded', async function(e) {
             <div class="text label" data-i18n-text="Speech"></div>
             <div class="column">
               <div class="rowWrap">
-                <div class="command selected" data-item="voice-type" data-type="option" data-voice-type="google">Google</div>
+                <div class="command" data-item="voice-type" data-type="option" data-voice-type="google">Google</div>
                 <div class="command" data-item="voice-type" data-type="option" data-voice-type="microsoft">Microsoft</div>
-                <div class="command" data-item="voice-type" data-type="option" data-voice-type="eleven">ElevenLabs</div>
+                <div class="command selected" data-item="voice-type" data-type="option" data-voice-type="eleven">ElevenLabs</div>
               </div>
             </div>
           </div>
