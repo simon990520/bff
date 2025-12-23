@@ -2677,108 +2677,44 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
           });
 
           if (res.ok) {
-
-            // Read the response as a stream of data
             const reader = res.body.getReader();
             const decoder = new TextDecoder("utf-8");
-            let exclude = null; // Exclude object
+            let buffer = '';
 
             while (true) {
-              let { done, value } = await reader.read();
+              const { done, value } = await reader.read();
+              if (done) break;
 
-              // Extract text data
-              if (value) {
-                decoder.decode(value).split('\n').forEach(data => {
-                  if (data.startsWith("data: ")) {
-                    let line = data.substring(6).trim();
-                    if (line === '[DONE]') {
-                      done = true;
-                    } else {
-                      let obj;
-                      try {
-                        obj = JSON.parse(line);
-                      } catch (error) {
-                        throw new Error("Error JSON parsing line: " + line);
-                      }
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop(); // Keep partial line in buffer
 
-                      if (obj && obj.error) throw new Error(obj.error.message || '' + res.status);
-                      fn.id += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.id || '';
-                      fn.name += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name || '';
-                      fn.arguments += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments || '';
+              for (const data of lines) {
+                const trimmed = data.trim();
+                if (!trimmed || !trimmed.startsWith("data: ")) continue;
+                const line = trimmed.substring(6).trim();
+                if (line === '[DONE]') continue;
 
-                      // Append streamed text to UI incrementally
-                      const piece = obj?.choices?.[0]?.delta?.content || '';
-                      if (piece && node) {
-                        try { addText(node, piece); } catch (e) { /* ignore */ }
-                      }
-                      node.dataset.output += piece;
-                      tts += piece;
+                try {
+                  const obj = JSON.parse(line);
+                  if (obj && obj.error) throw new Error(obj.error.message);
 
-                    }
+                  fn.id += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.id || '';
+                  fn.name += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name || '';
+                  fn.arguments += obj?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments || '';
+
+                  const piece = obj?.choices?.[0]?.delta?.content || '';
+                  if (piece && node) {
+                    try { addText(node, piece); } catch (e) { }
                   }
-                });
+                  node.dataset.output += piece;
+                  tts += piece;
+                } catch (e) {
+                  console.warn("Skipping malformed stream line:", line, e);
+                }
               }
 
-              // Break, if done
-              if (done) {
-                if (fn.id) {
-
-                  // Function call
-                  body.messages.push({
-                    role: "assistant",
-                    content: null,
-                    tool_calls: [
-                      {
-                        id: fn.id,
-                        type: "function",
-                        function: {
-                          name: fn.name,
-                          arguments: fn.arguments
-                        }
-                      }
-                    ]
-                  });
-
-                  // Call the function
-                  try {
-                    const m = JSON.parse(fn.arguments);
-                    motion(m.action, m.stillpose, m.gesture, m.mood);
-                  } catch (motionError) {
-                    console.error(motionError);
-                  }
-
-                  // Response
-                  body.messages.push({
-                    role: "tool",
-                    content: "",
-                    tool_call_id: fn.id
-                  });
-
-                  // Make sure we do not get another function call
-                  body.tool_choice = "none";
-                }
-
-                if (tts) {
-                  if (cfg('voice-type') === 'eleven') {
-                    await elevenSpeak(tts.trimStart() + " ", node);
-                  } else if (cfg('voice-type') === 'microsoft') {
-                    await microsoftSpeak(tts.trimStart() + " ", node);
-                  } else {
-                    exclude = excludesProcess(tts, exclude);
-                    await head.speakText(tts, {
-                      lipsyncLang: cfg('voice-lipsync-lang'),
-                      ttsVoice: cfg('voice-google-id'),
-                      ttsLang: cfg('voice-google-id').substring(0, 5),
-                      ttsRate: cfg('voice-google-rate'),
-                      ttsPitch: cfg('voice-google-pitch')
-                    }, addText.bind(null, node), exclude.excludes);
-                  }
-                }
-
-                break;
-              }
-
-              // Speak
+              // Speak sentences incrementally
               if (tts) {
                 let idx = 0;
                 ['.', '!', '?', '\n'].forEach(x => {
@@ -2794,30 +2730,61 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
                     } else if (cfg('voice-type') === 'microsoft') {
                       await microsoftSpeak(s + " ", node);
                     } else {
-                      exclude = excludesProcess(s, exclude);
                       await head.speakText(s, {
                         lipsyncLang: cfg('voice-lipsync-lang'),
                         ttsVoice: cfg('voice-google-id'),
                         ttsLang: cfg('voice-google-id').substring(0, 5),
                         ttsRate: cfg('voice-google-rate'),
                         ttsPitch: cfg('voice-google-pitch')
-                      }, addText.bind(null, node), exclude.excludes);
+                      }, addText.bind(null, node));
                     }
                   }
                 }
               }
-
             }
 
-            // Moderate
-            let flag = await openaiModerateMessage([{ content: node.dataset.output, n: node }]);
+            if (fn.id) {
+              // Function call setup
+              body.messages.push({
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: fn.id,
+                  type: "function",
+                  function: { name: fn.name, arguments: fn.arguments }
+                }]
+              });
+              try {
+                const m = JSON.parse(fn.arguments);
+                motion(m.action, m.stillpose, m.gesture, m.mood);
+              } catch (e) { console.error(e); }
 
+              body.messages.push({ role: "tool", content: "", tool_call_id: fn.id });
+              body.tool_choice = "none";
+            } else if (tts) {
+              // Final speech for the remaining text
+              if (cfg('voice-type') === 'eleven') {
+                await elevenSpeak(tts.trimStart() + " ", node);
+              } else if (cfg('voice-type') === 'microsoft') {
+                await microsoftSpeak(tts.trimStart() + " ", node);
+              } else {
+                await head.speakText(tts, {
+                  lipsyncLang: cfg('voice-lipsync-lang'),
+                  ttsVoice: cfg('voice-google-id'),
+                  ttsLang: cfg('voice-google-id').substring(0, 5),
+                  ttsRate: cfg('voice-google-rate'),
+                  ttsPitch: cfg('voice-google-pitch')
+                }, addText.bind(null, node));
+              }
+              tts = '';
+            }
           } else {
-            console.error(await res.text());
-            throw new Error(json.error ? json.error.message : '' + res.status);
+            const errBody = await res.text();
+            console.error(errBody);
+            throw new Error(errBody);
           }
-
-        } while (fn.id); // Repeat, if this iteration was a function call
+        } while (fn.id);
+        // Repeat, if this iteration was a function call
 
       } catch (error) {
         if (signal.aborted) error = "aborted";
