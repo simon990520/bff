@@ -34,11 +34,48 @@ if (CLERK_ENABLED) {
   console.warn('[WARN] Clerk not configured. Auth gating is disabled. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY in .env');
 }
 
-// Serve static files from project root
-app.use(express.static(__dirname));
+// Optional Clerk auth wiring (enabled only if env keys are present)
+const CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KEY || '';
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || '';
+const CLERK_ENABLED = !!(CLERK_PUBLISHABLE_KEY && CLERK_SECRET_KEY);
+
+
+let needAuth = (req, res, next) => next();
+if (CLERK_ENABLED) {
+  app.use(clerkMiddleware());
+  // Custom auth middleware that returns JSON instead of redirecting
+  needAuth = (req, res, next) => {
+    if (!req.auth?.userId) {
+      return res.status(401).json({ error: 'Unauthenticated' });
+    }
+    next();
+  };
+  console.log('[INFO] Clerk authentication enabled');
+} else {
+  console.warn('[WARN] Clerk not configured. Auth gating is disabled. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY in .env');
+}
+
+
 
 // Health check
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+// Public app config
+app.get('/app/config', (req, res) => {
+  res.json({
+    clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || '',
+    firebase: {
+      apiKey: process.env.FIREBASE_API_KEY || '',
+      authDomain: process.env.FIREBASE_AUTH_DOMAIN || '',
+      databaseURL: process.env.FIREBASE_DATABASE_URL || '',
+      projectId: process.env.FIREBASE_PROJECT_ID || '',
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
+      messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '',
+      appId: process.env.FIREBASE_APP_ID || '',
+      measurementId: process.env.FIREBASE_MEASUREMENT_ID || ''
+    }
+  });
+});
 
 // Stub JWT endpoint to avoid 404s in the UI when JWT is not configured
 app.get('/app/jwt/get', (req, res) => {
@@ -52,6 +89,8 @@ app.post('/gtts/', (req, res) => {
   console.log('[GoogleTTS] /gtts/ (not configured)');
   res.status(501).json({ error: 'Google TTS proxy not configured. Use ElevenLabs (Proxy) in settings.' });
 });
+
+
 
 // ---- OpenAI real proxies ----
 import { Readable } from 'stream';
@@ -89,7 +128,7 @@ app.post('/openai/v1/moderations', needAuth, async (req, res) => {
   console.log('[OpenAI] /v1/moderations');
   if (!OPENAI_KEY) {
     // No key -> safe default
-    return res.json({ id: 'stub-moderation', model: 'stub', results: [ { flagged: false, categories: {}, category_scores: {} } ] });
+    return res.json({ id: 'stub-moderation', model: 'stub', results: [{ flagged: false, categories: {}, category_scores: {} }] });
   }
   try {
     const upstream = await fetch('https://api.openai.com/v1/moderations', {
@@ -99,7 +138,7 @@ app.post('/openai/v1/moderations', needAuth, async (req, res) => {
     });
     if (upstream.status === 429) {
       // Graceful degrade: do not block UI on moderation quota
-      return res.json({ id: 'stub-moderation', model: 'stub', results: [ { flagged: false, categories: {}, category_scores: {} } ] });
+      return res.json({ id: 'stub-moderation', model: 'stub', results: [{ flagged: false, categories: {}, category_scores: {} }] });
     }
     res.status(upstream.status);
     const data = await upstream.text();
@@ -108,7 +147,7 @@ app.post('/openai/v1/moderations', needAuth, async (req, res) => {
   } catch (err) {
     console.error('[OpenAI moderation error]', err);
     // On error, default to not flagged
-    return res.json({ id: 'stub-moderation', model: 'stub', results: [ { flagged: false, categories: {}, category_scores: {} } ] });
+    return res.json({ id: 'stub-moderation', model: 'stub', results: [{ flagged: false, categories: {}, category_scores: {} }] });
   }
 });
 
@@ -118,7 +157,7 @@ app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
   if (!OPENAI_KEY) {
     // Fallback minimal SSE so UI continues
     res.setHeader('Content-Type', 'text/event-stream');
-    res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [ { delta: { content: 'OpenAI no configurado en servidor. ' } } ] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [{ delta: { content: 'OpenAI no configurado en servidor. ' } }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     return res.end();
   }
@@ -134,7 +173,7 @@ app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
       // Graceful SSE fallback message so UI doesn't error
       res.setHeader('Content-Type', 'text/event-stream');
       const msg = upstream.status === 429 ? 'OpenAI: cuota excedida. Usando respuesta local.' : 'OpenAI: error. Usando respuesta local.';
-      res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [ { delta: { content: msg } } ] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [{ delta: { content: msg } }] })}\n\n`);
       res.write('data: [DONE]\n\n');
       return res.end();
     }
@@ -145,13 +184,13 @@ app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
         const obj = JSON.parse(text);
         const content = obj?.choices?.[0]?.message?.content || '';
         res.setHeader('Content-Type', 'text/event-stream');
-        if (content) res.write(`data: ${JSON.stringify({ id: obj.id || 'json', choices: [ { delta: { content } } ] })}\n\n`);
+        if (content) res.write(`data: ${JSON.stringify({ id: obj.id || 'json', choices: [{ delta: { content } }] })}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
       } catch {
         // Fallback: send as one SSE chunk with raw text
         res.setHeader('Content-Type', 'text/event-stream');
-        res.write(`data: ${JSON.stringify({ id: 'raw', choices: [ { delta: { content: text.slice(0,512) } } ] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id: 'raw', choices: [{ delta: { content: text.slice(0, 512) } }] })}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
       }
@@ -169,41 +208,21 @@ app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
     console.error('[OpenAI chat error]', err);
     // Graceful SSE fallback
     res.setHeader('Content-Type', 'text/event-stream');
-    res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [ { delta: { content: 'OpenAI no disponible. ' } } ] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: 'fallback', choices: [{ delta: { content: 'OpenAI no disponible. ' } }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     return res.end();
   }
 });
 
-app.post('/openai/v1/audio/transcriptions', needAuth, async (req, res) => {
-  console.log('[OpenAI] /v1/audio/transcriptions (multipart proxy)');
-  if (!OPENAI_KEY) return res.status(401).json({ error: 'OPENAI_API_KEY is not configured on server' });
-  try {
-    // Forward the incoming multipart/form-data as-is to OpenAI
-    const ct = req.headers['content-type'] || 'application/octet-stream';
-    const upstream = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_KEY}`,
-        'Content-Type': ct,
-        'Accept': 'application/json'
-      },
-      body: req, // Node Readable stream
-      duplex: 'half'
-    });
-    res.status(upstream.status);
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
-    if (upstream.body) {
-      const readable = Readable.fromWeb(upstream.body);
-      readable.pipe(res);
-    } else {
-      res.end();
-    }
-  } catch (err) {
-    console.error('[OpenAI audio transcriptions error]', err);
-    res.status(500).json({ error: 'OpenAI audio proxy error' });
-  }
+app.post('/openai/v1/audio/transcriptions', needAuth, (req, res) => {
+  console.log('[OpenAI] /v1/audio/transcriptions');
+  proxyJson(req, res, 'https://api.openai.com/v1/audio/transcriptions');
 });
+
+
+
+// Serve static files from project root
+app.use(express.static(__dirname));
 
 const server = http.createServer(app);
 
@@ -254,7 +273,7 @@ server.on('upgrade', (req, socket, head) => {
       });
       upstream.on('error', (err) => {
         console.error('[ElevenLabs upstream error]', err.message);
-        try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream error'); } catch {}
+        try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream error'); } catch { }
       });
 
       // Data from client -> upstream
@@ -262,16 +281,16 @@ server.on('upgrade', (req, socket, head) => {
         if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
       });
       clientWs.on('close', () => {
-        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(); } catch {}
+        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(); } catch { }
       });
       clientWs.on('error', (err) => {
         console.error('[Client WS error]', err.message);
-        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(1011, 'Client error'); } catch {}
+        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(1011, 'Client error'); } catch { }
       });
     });
   } catch (err) {
     console.error('[upgrade error]', err);
-    try { socket.destroy(); } catch {}
+    try { socket.destroy(); } catch { }
   }
 });
 
