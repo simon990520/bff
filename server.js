@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import { clerkMiddleware, requireAuth } from '@clerk/express';
 import http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import path from 'path';
@@ -21,6 +22,17 @@ if (!OPENAI_KEY) {
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+// Optional Clerk auth wiring (enabled only if env keys are present)
+const CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KEY || '';
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || '';
+const CLERK_ENABLED = !!(CLERK_PUBLISHABLE_KEY && CLERK_SECRET_KEY);
+let needAuth = (req,res,next)=>next();
+if (CLERK_ENABLED) {
+  app.use(clerkMiddleware());
+  needAuth = requireAuth();
+} else {
+  console.warn('[WARN] Clerk not configured. Auth gating is disabled. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY in .env');
+}
 
 // Serve static files from project root
 app.use(express.static(__dirname));
@@ -73,7 +85,7 @@ async function proxyJson(req, res, upstreamUrl, streamLike = false) {
   }
 }
 
-app.post('/openai/v1/moderations', async (req, res) => {
+app.post('/openai/v1/moderations', needAuth, async (req, res) => {
   console.log('[OpenAI] /v1/moderations');
   if (!OPENAI_KEY) {
     // No key -> safe default
@@ -100,7 +112,7 @@ app.post('/openai/v1/moderations', async (req, res) => {
   }
 });
 
-app.post('/openai/v1/chat/completions', async (req, res) => {
+app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
   const wantStream = !!(req.body && req.body.stream);
   console.log('[OpenAI] /v1/chat/completions stream=%s', wantStream);
   if (!OPENAI_KEY) {
@@ -163,9 +175,34 @@ app.post('/openai/v1/chat/completions', async (req, res) => {
   }
 });
 
-app.post('/openai/v1/audio/transcriptions', (req, res) => {
-  console.log('[OpenAI] /v1/audio/transcriptions');
-  proxyJson(req, res, 'https://api.openai.com/v1/audio/transcriptions');
+app.post('/openai/v1/audio/transcriptions', needAuth, async (req, res) => {
+  console.log('[OpenAI] /v1/audio/transcriptions (multipart proxy)');
+  if (!OPENAI_KEY) return res.status(401).json({ error: 'OPENAI_API_KEY is not configured on server' });
+  try {
+    // Forward the incoming multipart/form-data as-is to OpenAI
+    const ct = req.headers['content-type'] || 'application/octet-stream';
+    const upstream = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_KEY}`,
+        'Content-Type': ct,
+        'Accept': 'application/json'
+      },
+      body: req, // Node Readable stream
+      duplex: 'half'
+    });
+    res.status(upstream.status);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    if (upstream.body) {
+      const readable = Readable.fromWeb(upstream.body);
+      readable.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    console.error('[OpenAI audio transcriptions error]', err);
+    res.status(500).json({ error: 'OpenAI audio proxy error' });
+  }
 });
 
 const server = http.createServer(app);
@@ -181,6 +218,17 @@ server.on('upgrade', (req, socket, head) => {
     if (!pathname.startsWith('/elevenlabs/')) {
       socket.destroy();
       return;
+    }
+
+    if (CLERK_ENABLED) {
+      // Basic gate for WS: require Clerk session cookie or Authorization bearer
+      const hasClerkCookie = (req.headers.cookie || '').includes('__session=');
+      const hasBearer = (req.headers['authorization'] || '').startsWith('Bearer ');
+      if (!hasClerkCookie && !hasBearer) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
     }
 
     // Upgrade client connection

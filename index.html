@@ -6,6 +6,7 @@
   <meta charset="utf-8">
   <meta content="width=device-width, height=device-height, minimum-scale=1.0, maximum-scale=1.0, initial-scale=1.0, user-scalable=no, interactive-widget=resizes-content" name="viewport">
   <link rel="icon" type="image/jpg" href="favicon.jpg">
+  
 
   <style>
 
@@ -3774,6 +3775,74 @@ document.addEventListener('DOMContentLoaded', async function(e) {
   });
   window.head = head;
 
+  // ------------------- Clerk Auth (optional) -------------------
+  let authEnabled = false;
+  let isSignedIn = true; // default true if Clerk not configured
+  let clerk = null;
+  async function initClerk() {
+    try {
+      const key = (site && site.clerkPublishableKey) ? site.clerkPublishableKey : '';
+      if (!key) { isSignedIn = true; return; }
+      // Load Clerk browser SDK dynamically to avoid auto-init errors
+      await new Promise((resolve, reject) => {
+        if (window.Clerk) return resolve();
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js';
+        s.defer = true;
+        s.setAttribute('data-clerk-publishable-key', key);
+        s.onload = () => resolve();
+        s.onerror = (e) => reject(e);
+        document.head.appendChild(s);
+      });
+      if (!window.Clerk) { isSignedIn = true; return; }
+      authEnabled = true;
+      clerk = window.Clerk;
+      await clerk.load();
+      const setState = () => { isSignedIn = !!(clerk.user && clerk.user.id); updateAuthUI(); };
+      clerk.addListener(setState);
+      setState();
+    } catch (e) {
+      console.warn('Clerk init skipped', e);
+      isSignedIn = true; // fail open
+    }
+  }
+
+  function updateAuthUI() {
+    try {
+      let btn = document.getElementById('authbtn');
+      if (!btn) {
+        btn = document.createElement('button');
+        btn.id = 'authbtn';
+        btn.type = 'button';
+        btn.style.position = 'fixed';
+        btn.style.top = '10px';
+        btn.style.right = '10px';
+        btn.style.zIndex = '10001';
+        btn.style.padding = '6px 10px';
+        btn.style.borderRadius = '6px';
+        btn.style.border = '1px solid #444';
+        btn.style.background = '#222';
+        btn.style.color = '#ddd';
+        document.body.appendChild(btn);
+      }
+      if (!authEnabled) { btn.style.display = 'none'; return; }
+      btn.style.display = 'inline-block';
+      btn.textContent = isSignedIn ? 'Sign out' : 'Sign in';
+      btn.onclick = () => { isSignedIn ? clerk.signOut() : clerk.openSignIn(); };
+
+      // Input and mic guard visuals
+      const input = document.getElementById('input');
+      if (input) {
+        input.disabled = !isSignedIn;
+        input.placeholder = isSignedIn ? 'Message.' : 'Sign in to chat';
+      }
+      const micbtn = document.getElementById('micbtn');
+      if (micbtn) micbtn.disabled = !isSignedIn;
+    } catch(_){}
+  }
+
+  await initClerk();
+
   // SAFETY NET: route speakText to the selected provider
   try {
     const _origSpeakText = head.speakText.bind(head);
@@ -3805,6 +3874,105 @@ document.addEventListener('DOMContentLoaded', async function(e) {
 
   // Media progress
   d3.select("#video").node().addEventListener("progress", progressMedia);
+
+  // --- Voice input (microphone -> Whisper -> chat) ---
+  let micStream = null;
+  let micRecorder = null;
+  let micChunks = [];
+  let micActive = false;
+
+  async function micStart() {
+    if (authEnabled && !isSignedIn) { clerk && clerk.openSignIn && clerk.openSignIn(); return; }
+    if (micActive) return;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
+      micChunks = [];
+      micRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) micChunks.push(e.data); };
+      micRecorder.onstop = micOnStop;
+      micRecorder.start();
+      micActive = true;
+      d3.select('#micbtn').classed('recording', true).text('● Rec');
+    } catch (err) {
+      console.error('Mic start error', err);
+    }
+  }
+
+  async function micStop() {
+    if (!micActive) return;
+    micActive = false;
+    try { micRecorder && micRecorder.stop(); } catch(_){}
+    try { micStream && micStream.getTracks().forEach(t=>t.stop()); } catch(_){}
+    d3.select('#micbtn').classed('recording', false).text('🎤');
+  }
+
+  async function micOnStop() {
+    try {
+      const blob = new Blob(micChunks, { type: 'audio/webm' });
+      const fd = new FormData();
+      fd.append('file', blob, 'audio.webm');
+      fd.append('model', 'whisper-1');
+      // Optional: set language from UI if available
+      try { const lang = (cfg('voice-lipsync-lang')||'').slice(0,2); if (lang) fd.append('language', lang); } catch(_){ }
+
+      const res = await fetch('/openai/v1/audio/transcriptions', { method: 'POST', body: fd });
+      if (!res.ok) { console.error('STT error', res.status); return; }
+      const data = await res.json();
+      const text = (data && (data.text || data.text === '' ? data.text : data.result || '')) || '';
+      if (text && text.length) {
+        const input = d3.select('#input');
+        input.property('value', text);
+        // Trigger the same flow as pressing Enter
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, which: 13, bubbles: true });
+        input.node().dispatchEvent(ev);
+      }
+    } catch (err) {
+      console.error('Mic onstop error', err);
+    } finally {
+      micChunks = [];
+    }
+  }
+
+  // Add mic button next to input
+  try {
+    const inputNode = d3.select('#input').node();
+    if (inputNode && inputNode.parentElement) {
+      const btn = document.createElement('button');
+      btn.id = 'micbtn';
+      btn.type = 'button';
+      btn.textContent = '🎤';
+      btn.style.marginLeft = '8px';
+      btn.style.padding = '6px 10px';
+      btn.style.borderRadius = '6px';
+      btn.style.border = '1px solid #444';
+      btn.style.background = '#222';
+      btn.style.color = '#ddd';
+      btn.title = 'Pulsa para hablar (Click) / Ctrl+M para alternar';
+      btn.addEventListener('click', () => { micActive ? micStop() : micStart(); });
+      inputNode.parentElement.appendChild(btn);
+    }
+    // Keyboard shortcut Ctrl+M
+    document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
+        e.preventDefault();
+        if (authEnabled && !isSignedIn) { clerk && clerk.openSignIn && clerk.openSignIn(); return; }
+        micActive ? micStop() : micStart();
+      }
+    });
+  } catch (err) { console.warn('Mic UI init failed', err); }
+
+  // Prevent send on Enter if not signed in (capturing)
+  try {
+    const inputNode = document.getElementById('input');
+    if (inputNode) {
+      inputNode.addEventListener('keydown', (ev) => {
+        if (ev.keyCode === 13 && !ev.shiftKey && authEnabled && !isSignedIn) {
+          ev.preventDefault();
+          clerk && clerk.openSignIn && clerk.openSignIn();
+        }
+      }, true);
+    }
+  } catch(_){}
 
   // Auto resize textarea
   d3.selectAll("textarea").on("input.resize change.resize keyup.resize paste.resize", function(e) {

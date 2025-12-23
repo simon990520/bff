@@ -101,4 +101,6 @@ export const site = {
     'Murmur': { url: './audio/murmur.mp3', fi: 'Puheensorina'}
   }
 
+  ,clerkPublishableKey: 'pk_test_YnVzeS1vc3ByZXktMjcuY2xlcmsuYWNjb3VudHMuZGV2JA' // Set your Clerk publishable key here to enable auth gating
+
 };

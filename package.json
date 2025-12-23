@@ -10,10 +10,11 @@
     "modules/*"
   ],
   "dependencies": {
-    "three": "^0.180.0",
+    "@clerk/express": "^1.7.60",
+    "dotenv": "^16.4.5",
     "express": "^4.21.1",
-    "ws": "^8.18.0",
-    "dotenv": "^16.4.5"
+    "three": "^0.180.0",
+    "ws": "^8.18.0"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
