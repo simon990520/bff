@@ -9,7 +9,7 @@
     content="width=device-width, height=device-height, minimum-scale=1.0, maximum-scale=1.0, initial-scale=1.0, user-scalable=no, interactive-widget=resizes-content"
     name="viewport">
   <link rel="icon" type="image/jpg" href="favicon.jpg">
-  
+
 
   <style>
     html {
@@ -1020,22 +1020,47 @@
 
       async storeMemory(mem) {
         if (!mem || !mem.text || !window.Clerk?.user) return;
-        console.log('[BFF] Storing Long-Term Memory:', mem.text);
 
         const vector = await this.getEmbedding(mem.text);
         if (!vector) return;
 
         const token = await jwtGet();
+        const namespace = `user_${window.Clerk.user.id}_avatar_default`;
+
+        let finalId = 'mem_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        let finalMetadata = { type: 'general', importance: 0.5, ...mem, timestamp: Date.now() };
+
+        try {
+          // Check for existing similar memory (Deduplication)
+          const checkRes = await fetch('/app/memory/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({ namespace, vector, topK: 1 })
+          });
+          const checkData = await checkRes.json();
+          const bestMatch = (checkData.matches || [])[0];
+
+          if (bestMatch && bestMatch.score > 0.85) {
+            console.log('[BFF] Consolidating memory:', mem.text, '(Match:', bestMatch.metadata.text, ')');
+            finalId = bestMatch.id; // Overwrite existing record
+            const oldImportance = parseFloat(bestMatch.metadata.importance || 0.5);
+            finalMetadata = {
+              ...bestMatch.metadata,
+              ...mem,
+              importance: Math.min(1.0, oldImportance + 0.15), // Increase importance
+              timestamp: Date.now()
+            };
+          } else {
+            console.log('[BFF] Storing new memory:', mem.text);
+          }
+        } catch (e) { console.warn('[BFF] Deduplication check failed', e); }
+
         await fetch('/app/memory/upsert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
           body: JSON.stringify({
-            namespace: `user_${window.Clerk.user.id}_avatar_default`,
-            vectors: [{
-              id: 'mem_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
-              values: vector,
-              metadata: { type: 'general', importance: 0.5, ...mem, timestamp: Date.now() }
-            }]
+            namespace,
+            vectors: [{ id: finalId, values: vector, metadata: finalMetadata }]
           })
         }).catch(e => console.error(e));
       },
