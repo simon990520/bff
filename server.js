@@ -90,6 +90,46 @@ app.post('/gtts/', (req, res) => {
   res.status(501).json({ error: 'Google TTS proxy not configured. Use ElevenLabs (Proxy) in settings.' });
 });
 
+// --- Pinecone Memory Implementation ---
+let pc = null;
+if (process.env.PINECONE_API_KEY) {
+  try {
+    pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
+    console.log('[INFO] Pinecone client initialized');
+  } catch (e) { console.warn('[WARN] Pinecone init failed:', e.message); }
+}
+
+app.post('/app/memory/upsert', needAuth, async (req, res) => {
+  if (!pc) return res.status(503).json({ error: 'Pinecone unconfigured' });
+  try {
+    const { vectors, namespace } = req.body;
+    const indexName = process.env.PINECONE_INDEX_NAME || 'bff-memory';
+    const index = pc.index(indexName);
+    await index.namespace(namespace).upsert(vectors);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[Pinecone Upsert Error]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/app/memory/query', needAuth, async (req, res) => {
+  if (!pc) return res.status(503).json({ error: 'Pinecone unconfigured' });
+  try {
+    const { vector, namespace, topK } = req.body;
+    const indexName = process.env.PINECONE_INDEX_NAME || 'bff-memory';
+    const index = pc.index(indexName);
+    const result = await index.namespace(namespace).query({
+      vector,
+      topK: topK || 5, // Default topK as per rules
+      includeMetadata: true
+    });
+    res.json(result);
+  } catch (e) {
+    console.error('[Pinecone Query Error]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 
 // ---- OpenAI real proxies ----
@@ -217,6 +257,11 @@ app.post('/openai/v1/chat/completions', needAuth, async (req, res) => {
 app.post('/openai/v1/audio/transcriptions', needAuth, (req, res) => {
   console.log('[OpenAI] /v1/audio/transcriptions');
   proxyJson(req, res, 'https://api.openai.com/v1/audio/transcriptions');
+});
+
+app.post('/openai/v1/embeddings', needAuth, (req, res) => {
+  // console.log('[OpenAI] /v1/embeddings');
+  proxyJson(req, res, 'https://api.openai.com/v1/embeddings');
 });
 
 

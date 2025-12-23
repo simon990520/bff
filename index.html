@@ -909,11 +909,13 @@
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
     import { getDatabase, ref, get, set, update, onValue, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
 
-    // BFF System (User Identity Layer - Realtime DB)
+    // BFF System (User Identity Layer - Realtime DB + Pinecone Memory)
     const BFF = {
       db: null,
       profile: null,
-      unsubscribe: null,
+      avatarProfile: null,
+      unsubscribeUser: null,
+      unsubscribeAvatar: null,
 
       async init(config) {
         if (!config || !config.apiKey) return;
@@ -927,24 +929,20 @@
       async syncProfile(user) {
         if (!this.db || !user) return;
         const userRef = ref(this.db, `users/${user.id}/profile`);
-
         try {
-          // Initial check
           const snapshot = await get(userRef);
-
           if (snapshot.exists()) {
             this.profile = snapshot.val();
-            console.log('[BFF] Profile loaded:', this.profile.name);
-            update(userRef, { lastInteraction: Date.now() }).catch(e => console.warn(e));
+            update(userRef, { lastInteraction: Date.now() }).catch(e => { });
           } else {
-            console.log('[BFF] Creating new profile...');
+            console.log('[BFF] Creating new user profile...');
             const newProfile = {
               name: user.firstName || "User",
               nickname: user.firstName || "Friend",
               email: user.primaryEmailAddress?.emailAddress || "",
               createdAt: Date.now(),
               lastInteraction: Date.now(),
-              // Default BFF rules
+              onboardingComplete: false,
               sensitivityLevel: 0.5,
               trustLevel: 0.1,
               emotionalBaseline: "neutral",
@@ -954,19 +952,189 @@
             await set(userRef, newProfile);
             this.profile = newProfile;
           }
+          if (this.unsubscribeUser) this.unsubscribeUser();
+          this.unsubscribeUser = onValue(userRef, (snap) => { if (snap.val()) this.profile = snap.val(); });
+        } catch (e) { console.error('[BFF] Sync User Error', e); }
+      },
 
-          // Realtime Listener
-          if (this.unsubscribe) this.unsubscribe();
-          this.unsubscribe = onValue(userRef, (snap) => {
-            const val = snap.val();
-            if (val) {
-              this.profile = val;
-              // Optional: Trigger UI update or log
-              // console.log('[BFF] Profile updated in realtime');
-            }
+      async syncAvatar(avatarId = 'default') {
+        if (!this.db) return;
+        const avRef = ref(this.db, `avatars/${avatarId}/profile`);
+        try {
+          const snapshot = await get(avRef);
+          if (snapshot.exists()) {
+            this.avatarProfile = snapshot.val();
+          } else {
+            console.log('[BFF] Creating new avatar profile (Aiko)...');
+            const newAvatar = {
+              name: "Aiko",
+              role: "Best Friend",
+              type: "companion",
+              language: "es",
+              tone: "warm, friendly, close",
+              speakingStyle: "calm, emotional supportive, natural",
+              communicationEnergy: "moderate",
+              humorLevel: 0.6,
+              empathyLevel: 0.95,
+              curiosityLevel: 0.7,
+              kindnessLevel: 0.92,
+              assertivenessLevel: 0.4,
+              energyLevel: 0.6,
+              emotionalNature: "caring",
+              emotionalStability: 0.85,
+              emotionalWarmth: 0.95,
+              attachmentToUser: 0.1,
+              trustTowardUser: 0.2,
+              protectivenessLevel: 0.6,
+              relationshipPhilosophy: "supportive-best-friend",
+              identityCoreValues: ["loyalty", "understanding", "growth"],
+              evolutionLevel: 0.0,
+              createdAt: Date.now()
+            };
+            await set(avRef, newAvatar);
+            this.avatarProfile = newAvatar;
+          }
+          if (this.unsubscribeAvatar) this.unsubscribeAvatar();
+          this.unsubscribeAvatar = onValue(avRef, (snap) => { if (snap.val()) this.avatarProfile = snap.val(); });
+        } catch (e) { console.error('[BFF] Sync Avatar Error', e); }
+      },
+
+      // --- Pinecone Memory Methods ---
+      async getEmbedding(text) {
+        try {
+          let headers = { "Content-Type": "application/json" };
+          const apikey = d3.select("#apikey-openai").property("value");
+          if (apikey) headers["Authorization"] = "Bearer " + apikey;
+          else headers["Authorization"] = "Bearer " + await jwtGet();
+
+          // Use server proxy if valid
+          const endpoint = apikey ? "https://api.openai.com/v1/embeddings" : "/openai/v1/embeddings";
+
+          const res = await fetch(endpoint, {
+            method: "POST", headers,
+            body: JSON.stringify({ model: "text-embedding-3-small", input: text })
           });
+          const data = await res.json();
+          if (data.data && data.data[0]) return data.data[0].embedding;
+          return null;
+        } catch (e) { console.warn("Embedding error", e); return null; }
+      },
 
-        } catch (e) { console.error('[BFF] Sync Error', e); }
+      async storeMemory(mem) {
+        if (!mem || !mem.text || !window.Clerk?.user) return;
+        console.log('[BFF] Storing Long-Term Memory:', mem.text);
+
+        const vector = await this.getEmbedding(mem.text);
+        if (!vector) return;
+
+        const token = await jwtGet();
+        await fetch('/app/memory/upsert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({
+            namespace: `user_${window.Clerk.user.id}_avatar_default`,
+            vectors: [{
+              id: 'mem_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+              values: vector,
+              metadata: { type: 'general', importance: 0.5, ...mem, timestamp: Date.now() }
+            }]
+          })
+        }).catch(e => console.error(e));
+      },
+
+      async retrieveMemories(queryText) {
+        if (!window.Clerk?.user || !queryText) return [];
+        const vector = await this.getEmbedding(queryText);
+        if (!vector) return [];
+
+        try {
+          const token = await jwtGet();
+          const res = await fetch('/app/memory/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({
+              namespace: `user_${window.Clerk.user.id}_avatar_default`,
+              vector: vector,
+              topK: 4 // Top 4 relevant memories
+            })
+          });
+          const data = await res.json();
+          return (data.matches || []).filter(m => m.score > 0.35); // Filter by relevance
+        } catch (e) { console.error(e); return []; }
+      },
+
+      // --- Evolution Engine ---
+      async evolve(lastMessages) {
+        if (!this.db || !this.profile || !this.avatarProfile) return;
+
+        const payload = {
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `You are the BFF Evolution Engine. 
+Your goal: Analyze the conversation and update the User Profile, Avatar Psychological State, and Extract Long-Term Memories.
+
+CURRENT USER PROFILE: ${JSON.stringify(this.profile)}
+CURRENT AVATAR STATE: ${JSON.stringify(this.avatarProfile)}
+
+TASKS:
+1. EXTRACT DATA: Detect new user info (Name, Age, Location, Likes/Dislikes).
+2. MEMORY EXTRACTION: Extract important facts/events to remember forever (Rule: Ignore small talk). 
+   - Example: "I love cats", "I failed my exam", "My mom is sick". 
+   - Store as 'memories' list with 'text', 'type' (event/preference/fact), and 'importance' (0.0-1.0).
+3. UPDATE STATS:
+   - 'trustLevel' (User->Avatar): 0.0-1.0
+   - 'attachmentToUser' (Avatar->User): 0.0-1.0
+   - 'emotionalBaseline': Update mood.
+4. ONBOARDING: Set 'onboardingComplete': true if Name is known.
+
+OUTPUT FORMAT (JSON Only):
+{
+  "userUpdates": { ... },
+  "avatarUpdates": { ... },
+  "memories": [ { "text": "...", "type": "preference", "importance": 0.9, "emotion": "joy" } ]
+}
+Respond ONLY with valid JSON.`
+            },
+            {
+              role: "user",
+              content: `Conversation:\n${JSON.stringify(lastMessages.slice(-4))}`
+            }
+          ],
+          response_format: { type: "json_object" }
+        };
+
+        try {
+          const token = await jwtGet();
+          const res = await fetch("/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (data.choices && data.choices[0].message.content) {
+            const updates = JSON.parse(data.choices[0].message.content);
+            console.log('[BFF] Evolution updates:', updates);
+
+            if (updates.userUpdates && Object.keys(updates.userUpdates).length) {
+              const uRef = ref(this.db, `users/${window.Clerk.user.id}/profile`);
+              update(uRef, updates.userUpdates);
+            }
+            if (updates.avatarUpdates && Object.keys(updates.avatarUpdates).length) {
+              const aRef = ref(this.db, `avatars/default/profile`);
+              update(aRef, updates.avatarUpdates);
+            }
+            // Memory Storage
+            if (updates.memories && Array.isArray(updates.memories)) {
+              for (const mem of updates.memories) {
+                if (mem.importance > 0.4) await this.storeMemory(mem);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[BFF] Evolution failed', e);
+        }
       }
     };
     window.BFF = BFF;
@@ -1172,7 +1340,10 @@
               // Init BFF (Firebase)
               if (window.BFF && cfg.firebase) {
                 await window.BFF.init(cfg.firebase);
-                if (clerk.user) await window.BFF.syncProfile(clerk.user);
+                if (clerk.user) {
+                  await window.BFF.syncProfile(clerk.user);
+                  await window.BFF.syncAvatar('default');
+                }
               }
 
               const authDiv = document.getElementById('clerk-auth');
@@ -2322,12 +2493,48 @@
     // Send messages to OpenAI API and handle streamed response
     async function openaiSendMessage(node, msgs) {
 
-      // BFF Context Injection
+      // BFF Context Injection & Evolution Trigger
+      let bffContext = '';
       if (window.BFF && window.BFF.profile) {
         const p = window.BFF.profile;
-        const bffContext = `\n\n[USER IDENTITY CONTEXT]\nName: ${p.name}\nNickname: ${p.nickname || p.name}\nLanguage: ${p.language || 'en'}\nHistory: ${p.lastInteraction}\nEmotional Baseline: ${p.emotionalBaseline}\nTrust Level: ${p.trustLevel}`;
+        const a = window.BFF.avatarProfile || {};
 
-        // Find system message or add one
+        // 1. Onboarding Mode?
+        if (p.onboardingComplete === false) {
+          // Force onboarding context
+          bffContext = `\n\n[SYSTEM MODE: ONBOARDING]\nThis is your FIRST interaction with this user. You do NOT know their name yet.\nYour goal: Warmly welcome them and ask for their name.\nMy Identity: Name=${a.name || 'AI'}, Role=${a.role}, Tone=${a.tone}.\nDo not be pushy. Be super friendly.`;
+        } else {
+          // Normal BFF Mode
+          bffContext = `\n\n[BFF SYSTEM ACTIVE]
+[MY IDENTITY - DO NOT BREAK CHARACTER]
+Name: ${a.name || 'Avatar'}
+Role: ${a.role}
+Tone: ${a.tone}
+Values: ${a.identityCoreValues ? a.identityCoreValues.join(', ') : ''}
+Stats: Humor=${a.humorLevel}, Empathy=${a.empathyLevel}, Attachment=${a.attachmentToUser}
+
+[USER IDENTITY]
+Name: ${p.nickname || p.name}
+History: ${p.lastInteraction}
+Trust Level: ${p.trustLevel}
+Emotional Baseline: ${p.emotionalBaseline}
+Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
+`;
+
+          // 2. Memory Retrieval
+          try {
+            const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+            if (lastUserMsg && window.BFF.retrieveMemories) {
+              const memories = await window.BFF.retrieveMemories(lastUserMsg.content);
+              if (memories && memories.length > 0) {
+                const memText = memories.map(m => `- ${m.metadata.text} [${m.metadata.timestamp ? new Date(m.metadata.timestamp).toLocaleDateString() : ''}]`).join('\n');
+                bffContext += `\n\n[DEEP MEMORY RECALL]\nRelevant past memories:\n${memText}\nReflect on these if relevant.`;
+              }
+            }
+          } catch (e) { console.warn("[Memory Retrieval Failed]", e); }
+        }
+
+        // Inject
         const sysMsg = msgs.find(m => m.role === 'system');
         if (sysMsg) {
           sysMsg.content += bffContext;
@@ -2580,6 +2787,13 @@
         console.error(error);
         addText(node, ' [' + error + ']');
       } finally {
+
+        // Trigger BFF Evolution
+        if (window.BFF && window.BFF.evolve && node.dataset.output && node.dataset.output.length > 5) {
+          const fullHistory = [...msgs, { role: 'assistant', content: node.dataset.output }];
+          window.BFF.evolve(fullHistory);
+        }
+
         aiController = null; // Reset the AbortController instance
         if (elevenSocket) {
           elevenSpeak("", null);
