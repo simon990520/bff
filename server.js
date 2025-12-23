@@ -5,6 +5,7 @@ import http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Pinecone } from '@pinecone-database/pinecone';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,6 +150,15 @@ async function proxyJson(req, res, upstreamUrl, streamLike = false) {
       },
       body: JSON.stringify(req.body || {})
     });
+
+    if (!upstream.ok) {
+      const errBody = await upstream.text();
+      console.error(`[OpenAI Proxy Error] URL: ${upstreamUrl} | Status: ${upstream.status} | Body: ${errBody}`);
+      // Re-sending error to client
+      res.status(upstream.status).send(errBody);
+      return;
+    }
+
     res.status(upstream.status);
     const ct = upstream.headers.get('content-type') || (streamLike ? 'text/event-stream' : 'application/json');
     res.setHeader('Content-Type', ct);

@@ -59,15 +59,14 @@
       padding: 0;
       background-color: var(--colorBackground);
       color: var(--colorBody);
-      overflow: hidden;
+      overflow: auto;
       text-align: left;
       touch-action: manipulation;
       font-family: "SansRegular", sans-serif;
       font-size: 1.4rem;
       line-height: 1.4rem;
-      scrollbar-color: var(--colorToolbarPassive) transparent;
-      scrollbar-width: 20px;
-      scrollbar-height: 20px;
+      scrollbar-width: thin;
+      scrollbar-color: #666 #222;
     }
 
     ::-webkit-scrollbar {
@@ -617,14 +616,12 @@
       -khtml-user-drag: none;
       -moz-user-drag: none;
       -o-user-drag: none;
-      -ms-user-drag: none;
-      user-drag: none;
+      pointer-events: none;
     }
 
     .disabled {
       opacity: 0.5;
       cursor: default;
-      pointer-events: none;
     }
 
     .hidden {
@@ -909,6 +906,19 @@
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
     import { getDatabase, ref, get, set, update, onValue, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
 
+    // Local Embeddings Engine (Transformers.js)
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
+    env.allowLocalModels = false; // Disable local lookups to avoid 404s
+    let embeddingPipeline = null;
+    const initEmbedding = async () => {
+      if (!embeddingPipeline) {
+        console.log('[BFF] Loading local embedding model (all-MiniLM-L6-v2)...');
+        embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+        console.log('[BFF] Local embedding model loaded.');
+      }
+      return embeddingPipeline;
+    };
+
     // BFF System (User Identity Layer - Realtime DB + Pinecone Memory)
     const BFF = {
       db: null,
@@ -999,25 +1009,13 @@
         } catch (e) { console.error('[BFF] Sync Avatar Error', e); }
       },
 
-      // --- Pinecone Memory Methods ---
+      // --- Local Embeddings Methods ---
       async getEmbedding(text) {
         try {
-          let headers = { "Content-Type": "application/json" };
-          const apikey = d3.select("#apikey-openai").property("value");
-          if (apikey) headers["Authorization"] = "Bearer " + apikey;
-          else headers["Authorization"] = "Bearer " + await jwtGet();
-
-          // Use server proxy if valid
-          const endpoint = apikey ? "https://api.openai.com/v1/embeddings" : "/openai/v1/embeddings";
-
-          const res = await fetch(endpoint, {
-            method: "POST", headers,
-            body: JSON.stringify({ model: "text-embedding-3-small", input: text })
-          });
-          const data = await res.json();
-          if (data.data && data.data[0]) return data.data[0].embedding;
-          return null;
-        } catch (e) { console.warn("Embedding error", e); return null; }
+          const pipe = await initEmbedding();
+          const output = await pipe(text, { pooling: 'mean', normalize: true });
+          return Array.from(output.data); // Returns 384-dim vector
+        } catch (e) { console.warn("[BFF] Local embedding error", e); return null; }
       },
 
       async storeMemory(mem) {
@@ -1135,6 +1133,45 @@ Respond ONLY with valid JSON.`
         } catch (e) {
           console.warn('[BFF] Evolution failed', e);
         }
+      },
+      // --- Diagnostic Tool ---
+      async diagnose() {
+        console.group('🔍 BFF Memory Diagnostic');
+        try {
+          // 1. Check Auth
+          const token = await jwtGet();
+          console.log('🔹 Auth Token:', token ? 'OK' : 'MISSING');
+          if (!token) throw new Error("No Auth Token (Login first)");
+
+          // 2. Check OpenAI Embeddings
+          console.log('🔹 Checking OpenAI Embeddings...');
+          const vector = await this.getEmbedding("test");
+          console.log('✅ Embedding Result:', vector ? `OK (Vector Length: ${vector.length})` : 'FAILED');
+          if (!vector) throw new Error("Embedding Generation Failed. Check OPENAI_API_KEY");
+
+          // 3. Check Pinecone Connection (Query)
+          console.log('🔹 Pinging Pinecone (Query)...');
+          const res = await fetch('/app/memory/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({
+              namespace: `user_${window.Clerk?.user?.id || 'anon'}_avatar_default`,
+              vector: vector,
+              topK: 1
+            })
+          });
+          const data = await res.json();
+          if (data.error) throw new Error("Pinecone Error: " + data.error);
+          console.log('✅ Pinecone Connection:', 'OK (Matches found: ' + (data.matches?.length || 0) + ')');
+
+          console.log('🎉 DIAGNOSTIC PASSED: System is connected.');
+          alert('✅ Diagnóstico Exitoso: Pinecone está conectado y respondiendo.\n\nTodo funciona correctamente.');
+
+        } catch (e) {
+          console.error('❌ DIAGNOSTIC FAILED:', e);
+          alert('❌ Error en Diagnóstico: ' + e.message + '\n\nAbre la consola (F12) para ver el error exacto.');
+        }
+        console.groupEnd();
       }
     };
     window.BFF = BFF;
