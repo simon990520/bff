@@ -906,6 +906,70 @@
     import { TalkingHead } from "./modules/talkinghead.mjs";
     import dompurify from 'dompurify';
     import { marked } from 'marked';
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+    import { getDatabase, ref, get, set, update, onValue, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
+
+    // BFF System (User Identity Layer - Realtime DB)
+    const BFF = {
+      db: null,
+      profile: null,
+      unsubscribe: null,
+
+      async init(config) {
+        if (!config || !config.apiKey) return;
+        try {
+          const app = initializeApp(config);
+          this.db = getDatabase(app);
+          console.log('[BFF] Firebase Realtime DB initialized');
+        } catch (e) { console.error('[BFF] Firebase Init Error', e); }
+      },
+
+      async syncProfile(user) {
+        if (!this.db || !user) return;
+        const userRef = ref(this.db, `users/${user.id}/profile`);
+
+        try {
+          // Initial check
+          const snapshot = await get(userRef);
+
+          if (snapshot.exists()) {
+            this.profile = snapshot.val();
+            console.log('[BFF] Profile loaded:', this.profile.name);
+            update(userRef, { lastInteraction: Date.now() }).catch(e => console.warn(e));
+          } else {
+            console.log('[BFF] Creating new profile...');
+            const newProfile = {
+              name: user.firstName || "User",
+              nickname: user.firstName || "Friend",
+              email: user.primaryEmailAddress?.emailAddress || "",
+              createdAt: Date.now(),
+              lastInteraction: Date.now(),
+              // Default BFF rules
+              sensitivityLevel: 0.5,
+              trustLevel: 0.1,
+              emotionalBaseline: "neutral",
+              favoriteTopics: [],
+              avoidedTopics: []
+            };
+            await set(userRef, newProfile);
+            this.profile = newProfile;
+          }
+
+          // Realtime Listener
+          if (this.unsubscribe) this.unsubscribe();
+          this.unsubscribe = onValue(userRef, (snap) => {
+            const val = snap.val();
+            if (val) {
+              this.profile = val;
+              // Optional: Trigger UI update or log
+              // console.log('[BFF] Profile updated in realtime');
+            }
+          });
+
+        } catch (e) { console.error('[BFF] Sync Error', e); }
+      }
+    };
+    window.BFF = BFF;
 
     // API proxys
     const wsProto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
@@ -1104,6 +1168,12 @@
             try {
               await clerk.load();
               console.log('Clerk initialized. User:', clerk.user ? clerk.user.id : 'None');
+
+              // Init BFF (Firebase)
+              if (window.BFF && cfg.firebase) {
+                await window.BFF.init(cfg.firebase);
+                if (clerk.user) await window.BFF.syncProfile(clerk.user);
+              }
 
               const authDiv = document.getElementById('clerk-auth');
               if (authDiv) {
@@ -2251,6 +2321,20 @@
 
     // Send messages to OpenAI API and handle streamed response
     async function openaiSendMessage(node, msgs) {
+
+      // BFF Context Injection
+      if (window.BFF && window.BFF.profile) {
+        const p = window.BFF.profile;
+        const bffContext = `\n\n[USER IDENTITY CONTEXT]\nName: ${p.name}\nNickname: ${p.nickname || p.name}\nLanguage: ${p.language || 'en'}\nHistory: ${p.lastInteraction}\nEmotional Baseline: ${p.emotionalBaseline}\nTrust Level: ${p.trustLevel}`;
+
+        // Find system message or add one
+        const sysMsg = msgs.find(m => m.role === 'system');
+        if (sysMsg) {
+          sysMsg.content += bffContext;
+        } else {
+          msgs.unshift({ role: "system", content: bffContext });
+        }
+      }
 
       // Create a new AbortController instance
       aiController = new AbortController();

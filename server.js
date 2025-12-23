@@ -257,6 +257,7 @@ server.on('upgrade', (req, socket, head) => {
       const upstreamUrl = `wss://api.elevenlabs.io${upstreamPath}${url.search}`;
 
       // Connect to ElevenLabs upstream
+      console.log(`[ElevenLabs] Connecting upstream. Key length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
       const upstream = new WebSocket(upstreamUrl, {
         headers: {
           'xi-api-key': ELEVEN_KEY,
