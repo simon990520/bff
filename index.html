@@ -1159,7 +1159,90 @@ Respond ONLY with valid JSON.`
           console.warn('[BFF] Evolution failed', e);
         }
       },
-      // --- Diagnostic Tool ---
+      // --- Emotional Engine ---
+      emotionalEngine: {
+        currentEmotion: 'neutral',
+        intensity: 0.5,
+        affectionLevel: 0.2,
+        trustWithUser: 0.2,
+
+        async analyze(userMessage, history = []) {
+          console.log('[BFF] Emotional Analysis triggered...');
+          const payload = {
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content: `You are the BFF Emotional Engine. 
+Determine the avatar's emotional state based on the user's message, sentiment, and relationship history.
+Allowed moods: neutral, happy, angry, sad, fear, disgust, love, sleep.
+
+Psychological Rules:
+- HAPPY: High joy, excitement, success, or positive user feedback.
+- ANGRY: Conflict, disrespect, high frustration, or defensiveness.
+- SAD: Loneliness, failure, depression, or deep vulnerability.
+- FEAR: Anxiety, worry, danger, or being overwhelmed.
+- DISGUST: Repulsion, dislike, or strong disagreement.
+- LOVE: Deep affection, trust, shared milestones, or romantic/deep-friendship signals.
+- SLEEP: Night time (if known), boredom, extreme exhaustion, or meditative calm.
+- NEUTRAL: Everyday talk, providing information, or standard friendly interaction.
+
+Current State: ${this.currentEmotion} (Intensity: ${this.intensity})
+User Trust: ${this.trustWithUser} Affection: ${this.affectionLevel}
+
+Output JSON Only:
+{
+  "currentEmotion": "neutral/happy/angry/sad/fear/disgust/love/sleep",
+  "intensity": 0.1-1.0,
+  "confidence": 0.1-1.0,
+  "affectionDelta": -0.1 to 0.1,
+  "trustDelta": -0.1 to 0.1,
+  "reasoning": "short explanation"
+}`
+              },
+              {
+                role: "user",
+                content: `History: ${JSON.stringify(history.slice(-3))}\nUser Message: "${userMessage}"`
+              }
+            ],
+            response_format: { type: "json_object" }
+          };
+
+          try {
+            const token = await jwtGet();
+            const res = await fetch("/openai/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+              body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.choices && data.choices[0].message.content) {
+              const result = JSON.parse(data.choices[0].message.content);
+              console.log('[BFF] Analysis result:', result);
+
+              this.currentEmotion = this.normalizeMood(result.currentEmotion);
+              this.intensity = result.intensity;
+              this.affectionLevel = Math.max(0, Math.min(1, this.affectionLevel + (result.affectionDelta || 0)));
+              this.trustWithUser = Math.max(0, Math.min(1, this.trustWithUser + (result.trustDelta || 0)));
+
+              if (window.head) {
+                window.head.setMood(this.currentEmotion);
+              }
+              return result;
+            }
+          } catch (e) {
+            console.warn('[BFF] Emotional analysis failed', e);
+          }
+          return null;
+        },
+
+        normalizeMood(mood) {
+          const valid = ['neutral', 'happy', 'sad', 'angry', 'fear', 'disgust', 'love', 'sleep'];
+          mood = (mood || 'neutral').toLowerCase();
+          return valid.includes(mood) ? mood : 'neutral';
+        }
+      },
+
       async diagnose() {
         console.group('🔍 BFF Memory Diagnostic');
         try {
@@ -1487,7 +1570,7 @@ Respond ONLY with valid JSON.`
     }
 
     // Speak using ElevenLabs
-    async function elevenSpeak(s, node = null) {
+    async function elevenSpeak(s, onsubtitles = null) {
       if (!elevenSocket) {
         // Temporary reservation of WebSocket connection
         elevenSocket = { readyState: 0 };
@@ -1535,7 +1618,7 @@ Respond ONLY with valid JSON.`
 
           // Speak audio
           if ((r.isFinal || r.normalizedAlignment) && elevenOutputMsg) {
-            head.speakAudio(elevenOutputMsg, { lipsyncLang: cfg('voice-lipsync-lang') }, node ? addText.bind(null, node) : null);
+            head.speakAudio(elevenOutputMsg, { lipsyncLang: cfg('voice-lipsync-lang') }, onsubtitles);
             if (elevenOnProcessed) {
               elevenOnProcessed();
             }
@@ -1614,7 +1697,7 @@ Respond ONLY with valid JSON.`
     let microsoftSynthesizer = null;
     const microsoftQueue = [];
 
-    async function microsoftSpeak(s, node = null, onprocessed = null) {
+    async function microsoftSpeak(s, onsubtitles = null, onprocessed = null) {
 
       if (s === null) {
         microsoftQueue.push(null);
@@ -1637,7 +1720,7 @@ Respond ONLY with valid JSON.`
 
         microsoftQueue.push({
           ssml: ssml,
-          node: node,
+          onsubtitles: onsubtitles,
           onprocessed: onprocessed,
           speak: {
             audio: [], words: [], wtimes: [], wdurations: [],
@@ -1756,7 +1839,7 @@ Respond ONLY with valid JSON.`
                 if (result.reason === window.SpeechSDK.ResultReason.SynthesizingAudioCompleted) {
                   const job = microsoftQueue[0];
                   job.speak.audio.push(result.audioData);
-                  head.speakAudio(job.speak, {}, job.node ? addText.bind(null, job.node) : null);
+                  head.speakAudio(job.speak, { lipsyncLang: cfg('voice-lipsync-lang') }, job.onsubtitles);
                   if (job.onprocessed) job.onprocessed();
                 }
                 microsoftQueue.shift();
@@ -2603,6 +2686,12 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
         } else {
           msgs.unshift({ role: "system", content: bffContext });
         }
+
+        // 3. Emotional Analysis (Fire and forget or wait depending on preference)
+        const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+        if (lastUserMsg && window.BFF.emotionalEngine) {
+          window.BFF.emotionalEngine.analyze(lastUserMsg.content, msgs);
+        }
       }
 
       // Create a new AbortController instance
@@ -2751,9 +2840,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
                   if (s && s.length) {
                     tts = tts.substring(idx).trimStart();
                     if (cfg('voice-type') === 'eleven') {
-                      await elevenSpeak(s + " ", node);
+                      await elevenSpeak(s + " ", addText.bind(null, node));
                     } else if (cfg('voice-type') === 'microsoft') {
-                      await microsoftSpeak(s + " ", node);
+                      await microsoftSpeak(s + " ", addText.bind(null, node));
                     } else {
                       await head.speakText(s, {
                         lipsyncLang: cfg('voice-lipsync-lang'),
@@ -2840,6 +2929,36 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
 
     // Send messages to local LLama API and handle streamed response
     async function grokSendMessage(node, msgs) {
+
+      // BFF Context Injection & Emotional Analysis
+      if (window.BFF && window.BFF.profile) {
+        const p = window.BFF.profile;
+        const a = window.BFF.avatarProfile || {};
+        let bffContext = `\n\n[BFF SYSTEM ACTIVE]\nUser: ${p.nickname || p.name}\nAvatar: ${a.name}, Role: ${a.role}, Tone: ${a.tone}\nTrust: ${p.trustLevel}, Emotional Baseline: ${p.emotionalBaseline}`;
+
+        // Memory Retrieval
+        try {
+          const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+          if (lastUserMsg && window.BFF.retrieveMemories) {
+            const memories = await window.BFF.retrieveMemories(lastUserMsg.content);
+            if (memories && memories.length > 0) {
+              const memText = memories.map(m => `- ${m.metadata.text}`).join('\n');
+              bffContext += `\n\n[MEMORIES]\n${memText}`;
+            }
+          }
+        } catch (e) { }
+
+        // Inject
+        const sysMsg = msgs.find(m => m.role === 'system');
+        if (sysMsg) sysMsg.content += bffContext;
+        else msgs.unshift({ role: "system", content: bffContext });
+
+        // Emotional Analysis
+        const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+        if (lastUserMsg && window.BFF.emotionalEngine) {
+          window.BFF.emotionalEngine.analyze(lastUserMsg.content, msgs);
+        }
+      }
 
       // Create a new AbortController instance
       aiController = new AbortController();
@@ -2935,9 +3054,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
 
               if (tts) {
                 if (cfg('voice-type') === 'eleven') {
-                  await elevenSpeak(tts.trimStart() + " ", node);
+                  await elevenSpeak(tts.trimStart() + " ", addText.bind(null, node));
                 } else if (cfg('voice-type') === 'microsoft') {
-                  await microsoftSpeak(tts.trimStart() + " ", node);
+                  await microsoftSpeak(tts.trimStart() + " ", addText.bind(null, node));
                 } else {
                   exclude = excludesProcess(tts, exclude);
                   await head.speakText(tts, {
@@ -2965,9 +3084,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
                 if (s && s.length) {
                   tts = tts.substring(idx).trimStart();
                   if (cfg('voice-type') === 'eleven') {
-                    await elevenSpeak(s + " ", node);
+                    await elevenSpeak(s + " ", addText.bind(null, node));
                   } else if (cfg('voice-type') === 'microsoft') {
-                    await microsoftSpeak(s + " ", node);
+                    await microsoftSpeak(s + " ", addText.bind(null, node));
                   } else {
                     exclude = excludesProcess(s, exclude);
                     await head.speakText(s, {
@@ -3011,6 +3130,36 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
 
     // Send messages to local LLama API and handle streamed response
     async function llamaSendMessage(node, msgs) {
+
+      // BFF Context Injection & Emotional Analysis
+      if (window.BFF && window.BFF.profile) {
+        const p = window.BFF.profile;
+        const a = window.BFF.avatarProfile || {};
+        let bffContext = `\n\n[BFF SYSTEM ACTIVE]\nUser: ${p.nickname || p.name}\nAvatar: ${a.name}, Role: ${a.role}, Tone: ${a.tone}\nTrust: ${p.trustLevel}, Emotional Baseline: ${p.emotionalBaseline}`;
+
+        // Memory Retrieval
+        try {
+          const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+          if (lastUserMsg && window.BFF.retrieveMemories) {
+            const memories = await window.BFF.retrieveMemories(lastUserMsg.content);
+            if (memories && memories.length > 0) {
+              const memText = memories.map(m => `- ${m.metadata.text}`).join('\n');
+              bffContext += `\n\n[MEMORIES]\n${memText}`;
+            }
+          }
+        } catch (e) { }
+
+        // Inject
+        const sysMsg = msgs.find(m => m.role === 'system');
+        if (sysMsg) sysMsg.content += bffContext;
+        else msgs.unshift({ role: "system", content: bffContext });
+
+        // Emotional Analysis
+        const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+        if (lastUserMsg && window.BFF.emotionalEngine) {
+          window.BFF.emotionalEngine.analyze(lastUserMsg.content, msgs);
+        }
+      }
 
       // Create a new AbortController instance
       aiController = new AbortController();
@@ -3097,9 +3246,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
 
               if (tts) {
                 if (cfg('voice-type') === 'eleven') {
-                  await elevenSpeak(tts.trimStart() + " ", node);
+                  await elevenSpeak(tts.trimStart() + " ", addText.bind(null, node));
                 } else if (cfg('voice-type') === 'microsoft') {
-                  await microsoftSpeak(tts.trimStart() + " ", node);
+                  await microsoftSpeak(tts.trimStart() + " ", addText.bind(null, node));
                 } else {
                   exclude = excludesProcess(tts, exclude);
                   await head.speakText(tts, {
@@ -3127,9 +3276,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
                 if (s && s.length) {
                   tts = tts.substring(idx).trimStart();
                   if (cfg('voice-type') === 'eleven') {
-                    await elevenSpeak(s + " ", node);
+                    await elevenSpeak(s + " ", addText.bind(null, node));
                   } else if (cfg('voice-type') === 'microsoft') {
-                    await microsoftSpeak(s + " ", node);
+                    await microsoftSpeak(s + " ", addText.bind(null, node));
                   } else {
                     exclude = excludesProcess(s, exclude);
                     await head.speakText(s, {
@@ -3241,6 +3390,36 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
 
     // Send messages to Gemini API and handle streamed response
     async function geminiSendMessage(node, msgs) {
+
+      // BFF Context Injection & Emotional Analysis
+      if (window.BFF && window.BFF.profile) {
+        const p = window.BFF.profile;
+        const a = window.BFF.avatarProfile || {};
+        let bffContext = `\n\n[BFF SYSTEM ACTIVE]\nUser: ${p.nickname || p.name}\nAvatar: ${a.name}, Role: ${a.role}, Tone: ${a.tone}\nTrust: ${p.trustLevel}, Emotional Baseline: ${p.emotionalBaseline}`;
+
+        // Memory Retrieval
+        try {
+          const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+          if (lastUserMsg && window.BFF.retrieveMemories) {
+            const memories = await window.BFF.retrieveMemories(lastUserMsg.content);
+            if (memories && memories.length > 0) {
+              const memText = memories.map(m => `- ${m.metadata.text}`).join('\n');
+              bffContext += `\n\n[MEMORIES]\n${memText}`;
+            }
+          }
+        } catch (e) { }
+
+        // Inject into system or first user msg
+        const sysMsg = msgs.find(m => m.role === 'system');
+        if (sysMsg) sysMsg.content += bffContext;
+        else msgs.unshift({ role: "system", content: bffContext });
+
+        // Emotional Analysis
+        const lastUserMsg = msgs.slice().reverse().find(m => m.role === 'user');
+        if (lastUserMsg && window.BFF.emotionalEngine) {
+          window.BFF.emotionalEngine.analyze(lastUserMsg.content, msgs);
+        }
+      }
 
       // Create a new AbortController instance
       aiController = new AbortController();
@@ -3398,9 +3577,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
               if (done) {
                 if (tts) {
                   if (cfg('voice-type') === 'eleven') {
-                    await elevenSpeak(tts + " ", node);
+                    await elevenSpeak(tts + " ", addText.bind(null, node));
                   } else if (cfg('voice-type') === 'microsoft') {
-                    await microsoftSpeak(tts + " ", node);
+                    await microsoftSpeak(tts + " ", addText.bind(null, node));
                   } else {
                     await head.speakText(tts, {
                       lipsyncLang: cfg('voice-lipsync-lang'),
@@ -3420,9 +3599,9 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
                 });
                 if (ndx > 10) {
                   if (cfg('voice-type') === 'eleven') {
-                    await elevenSpeak(tts.substring(0, ndx) + " ", node);
+                    await elevenSpeak(tts.substring(0, ndx) + " ", addText.bind(null, node));
                   } else if (cfg('voice-type') === 'microsoft') {
-                    await microsoftSpeak(tts.substring(0, ndx) + " ", node);
+                    await microsoftSpeak(tts.substring(0, ndx) + " ", addText.bind(null, node));
                   } else {
                     await head.speakText(tts.substring(0, ndx), {
                       lipsyncLang: cfg('voice-lipsync-lang'),
@@ -4710,10 +4889,10 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
           // Route to ElevenLabs unless Google is explicitly selected AND a valid Google endpoint exists
           if (!isGoogle || !hasGtts) {
             if (vt === 'microsoft') {
-              await microsoftSpeak(s);
+              await microsoftSpeak(s, onsubtitles);
               return;
             }
-            await elevenSpeak(s);
+            await elevenSpeak(s, onsubtitles);
             return;
           }
           // Only if Google explicitly selected and endpoint configured

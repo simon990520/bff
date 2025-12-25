@@ -23,23 +23,11 @@ if (!OPENAI_KEY) {
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
-// Optional Clerk auth wiring (enabled only if env keys are present)
+
+// Clerk auth wiring (enabled only if env keys are present)
 const CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KEY || '';
 const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || '';
 const CLERK_ENABLED = !!(CLERK_PUBLISHABLE_KEY && CLERK_SECRET_KEY);
-let needAuth = (req,res,next)=>next();
-if (CLERK_ENABLED) {
-  app.use(clerkMiddleware());
-  needAuth = requireAuth();
-} else {
-  console.warn('[WARN] Clerk not configured. Auth gating is disabled. Set CLERK_PUBLISHABLE_KEY and CLERK_SECRET_KEY in .env');
-}
-
-// Optional Clerk auth wiring (enabled only if env keys are present)
-const CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KEY || '';
-const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || '';
-const CLERK_ENABLED = !!(CLERK_PUBLISHABLE_KEY && CLERK_SECRET_KEY);
-
 
 let needAuth = (req, res, next) => next();
 if (CLERK_ENABLED) {
@@ -313,6 +301,10 @@ server.on('upgrade', (req, socket, head) => {
 
       // Connect to ElevenLabs upstream
       console.log(`[ElevenLabs] Connecting upstream. Key length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
+      if (ELEVEN_KEY && ELEVEN_KEY.startsWith('sk-')) {
+        console.warn('[ElevenLabs] WARNING: Your ELEVENLABS_API_KEY starts with "sk-". This looks like an OpenAI key, not an ElevenLabs key.');
+      }
+
       const upstream = new WebSocket(upstreamUrl, {
         headers: {
           'xi-api-key': ELEVEN_KEY,
