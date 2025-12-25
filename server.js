@@ -13,10 +13,35 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 
 const PORT = process.env.PORT || 5174;
 const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY || '';
+const ELEVEN_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+
+// Enhanced ElevenLabs API Key Validation
 if (!ELEVEN_KEY) {
   console.warn('[WARN] ELEVENLABS_API_KEY is not set. ElevenLabs WS proxy will fail without it.');
+} else {
+  // Sanitized logging: show first 4 and last 4 chars only
+  const keyPreview = ELEVEN_KEY.length > 8
+    ? `${ELEVEN_KEY.slice(0, 4)}...${ELEVEN_KEY.slice(-4)}`
+    : '***';
+  console.log(`[INFO] ElevenLabs API Key loaded: ${keyPreview} (length: ${ELEVEN_KEY.length})`);
+
+  // Detect common mistakes
+  if (ELEVEN_KEY.startsWith('sk-')) {
+    console.error('[ERROR] ELEVENLABS_API_KEY starts with "sk-" - this looks like an OpenAI key, NOT an ElevenLabs key!');
+    console.error('[ERROR] Please check your .env file and use the correct ElevenLabs API key.');
+  }
+  if (ELEVEN_KEY.includes(' ')) {
+    console.warn('[WARN] ELEVENLABS_API_KEY contains spaces - this may cause authentication issues.');
+  }
 }
+
+if (!ELEVEN_VOICE_ID) {
+  console.warn('[WARN] ELEVENLABS_VOICE_ID is not set. Voice synthesis may fail.');
+} else {
+  console.log(`[INFO] ElevenLabs Voice ID: ${ELEVEN_VOICE_ID}`);
+}
+
 if (!OPENAI_KEY) {
   console.warn('[WARN] OPENAI_API_KEY is not set. OpenAI proxy will return 401.');
 }
@@ -78,6 +103,36 @@ app.post('/gtts/', (req, res) => {
   console.log('[GoogleTTS] /gtts/ (not configured)');
   res.status(501).json({ error: 'Google TTS proxy not configured. Use ElevenLabs (Proxy) in settings.' });
 });
+
+// Debug endpoint for ElevenLabs configuration
+app.get('/debug/elevenlabs-config', (req, res) => {
+  const keyPresent = !!ELEVEN_KEY;
+  const keyLength = ELEVEN_KEY ? ELEVEN_KEY.length : 0;
+  const keyPreview = ELEVEN_KEY && ELEVEN_KEY.length > 8
+    ? `${ELEVEN_KEY.slice(0, 4)}...${ELEVEN_KEY.slice(-4)}`
+    : (keyPresent ? '***' : 'NOT SET');
+  const voiceIdPresent = !!ELEVEN_VOICE_ID;
+
+  res.json({
+    status: 'debug',
+    elevenlabs: {
+      apiKeyConfigured: keyPresent,
+      apiKeyLength: keyLength,
+      apiKeyPreview: keyPreview,
+      apiKeyLooksLikeOpenAI: ELEVEN_KEY ? ELEVEN_KEY.startsWith('sk-') : false,
+      apiKeyHasSpaces: ELEVEN_KEY ? ELEVEN_KEY.includes(' ') : false,
+      voiceIdConfigured: voiceIdPresent,
+      voiceId: voiceIdPresent ? ELEVEN_VOICE_ID : 'NOT SET'
+    },
+    recommendations: [
+      !keyPresent ? 'Set ELEVENLABS_API_KEY in .env file' : null,
+      ELEVEN_KEY && ELEVEN_KEY.startsWith('sk-') ? 'API key looks like OpenAI key - use ElevenLabs key instead' : null,
+      ELEVEN_KEY && ELEVEN_KEY.includes(' ') ? 'API key contains spaces - remove them' : null,
+      !voiceIdPresent ? 'Set ELEVENLABS_VOICE_ID in .env file' : null
+    ].filter(Boolean)
+  });
+});
+
 
 // --- Pinecone Memory Implementation ---
 let pc = null;
@@ -299,10 +354,14 @@ server.on('upgrade', (req, socket, head) => {
       const upstreamPath = pathname.replace('/elevenlabs/', '/');
       const upstreamUrl = `wss://api.elevenlabs.io${upstreamPath}${url.search}`;
 
-      // Connect to ElevenLabs upstream
-      console.log(`[ElevenLabs] Connecting upstream. Key length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
-      if (ELEVEN_KEY && ELEVEN_KEY.startsWith('sk-')) {
-        console.warn('[ElevenLabs] WARNING: Your ELEVENLABS_API_KEY starts with "sk-". This looks like an OpenAI key, not an ElevenLabs key.');
+      // Connect to ElevenLabs upstream with enhanced logging
+      console.log(`[ElevenLabs] Connecting to: ${upstreamUrl}`);
+      console.log(`[ElevenLabs] API Key present: ${!!ELEVEN_KEY}, Length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
+
+      if (!ELEVEN_KEY) {
+        console.error('[ElevenLabs] ERROR: No API key configured!');
+        clientWs.close(1008, 'ElevenLabs API key not configured on server');
+        return;
       }
 
       const upstream = new WebSocket(upstreamUrl, {
@@ -310,6 +369,11 @@ server.on('upgrade', (req, socket, head) => {
           'xi-api-key': ELEVEN_KEY,
           'origin': 'https://api.elevenlabs.io',
         }
+      });
+
+      // Log connection state changes
+      upstream.on('open', () => {
+        console.log('[ElevenLabs] ✓ WebSocket connection established');
       });
 
       // Data from upstream -> client
@@ -320,7 +384,20 @@ server.on('upgrade', (req, socket, head) => {
         if (clientWs.readyState === WebSocket.OPEN) clientWs.close(code, reason);
       });
       upstream.on('error', (err) => {
-        console.error('[ElevenLabs upstream error]', err.message);
+        console.error('[ElevenLabs upstream error] Full error:', err);
+        console.error('[ElevenLabs upstream error] Message:', err.message);
+        console.error('[ElevenLabs upstream error] URL attempted:', upstreamUrl);
+
+        // Check for specific error types
+        if (err.message.includes('403')) {
+          console.error('[ElevenLabs] ✗ 403 Forbidden - API key authentication failed');
+          console.error('[ElevenLabs] Troubleshooting steps:');
+          console.error('[ElevenLabs]   1. Verify ELEVENLABS_API_KEY in .env file');
+          console.error('[ElevenLabs]   2. Check key at: https://elevenlabs.io/app/settings/api-keys');
+          console.error('[ElevenLabs]   3. Ensure key has proper permissions');
+          console.error('[ElevenLabs]   4. Try regenerating the API key');
+        }
+
         try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream error'); } catch { }
       });
 

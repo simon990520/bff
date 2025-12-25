@@ -1594,8 +1594,8 @@ Output JSON Only:
           url += elevenTTSEndpoint[1];
           elevenInputMsgs[0]["xi_api_key"] = apikey;
         } else {
+          // Use proxy - JWT will be handled by server via cookies/headers
           url = elevenTTSProxy[0];
-          url += await jwtGet();
           url += elevenTTSProxy[1];
           url += cfg('voice-eleven-id');
           url += elevenTTSProxy[2];
