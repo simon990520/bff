@@ -371,9 +371,18 @@ server.on('upgrade', (req, socket, head) => {
         }
       });
 
+      // Buffer for messages from client -> upstream
+      let clientMsgBuffer = [];
+
       // Log connection state changes
       upstream.on('open', () => {
         console.log('[ElevenLabs] ✓ WebSocket connection established');
+        // Flush buffer
+        while (clientMsgBuffer.length > 0) {
+          const { data, isBinary } = clientMsgBuffer.shift();
+          console.log('[ElevenLabs] Flushing buffered message to upstream');
+          upstream.send(data, { binary: isBinary });
+        }
       });
 
       // Data from upstream -> client
@@ -391,11 +400,6 @@ server.on('upgrade', (req, socket, head) => {
         // Check for specific error types
         if (err.message.includes('403')) {
           console.error('[ElevenLabs] ✗ 403 Forbidden - API key authentication failed');
-          console.error('[ElevenLabs] Troubleshooting steps:');
-          console.error('[ElevenLabs]   1. Verify ELEVENLABS_API_KEY in .env file');
-          console.error('[ElevenLabs]   2. Check key at: https://elevenlabs.io/app/settings/api-keys');
-          console.error('[ElevenLabs]   3. Ensure key has proper permissions');
-          console.error('[ElevenLabs]   4. Try regenerating the API key');
         }
 
         try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream error'); } catch { }
@@ -403,7 +407,12 @@ server.on('upgrade', (req, socket, head) => {
 
       // Data from client -> upstream
       clientWs.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+        if (upstream.readyState === WebSocket.OPEN) {
+          upstream.send(data, { binary: isBinary });
+        } else {
+          console.log('[ElevenLabs] Upstream not ready, buffering client message');
+          clientMsgBuffer.push({ data, isBinary });
+        }
       });
       clientWs.on('close', () => {
         try { if (upstream.readyState === WebSocket.OPEN) upstream.close(); } catch { }
