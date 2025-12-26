@@ -915,10 +915,17 @@
     .new-app-container {
       position: fixed;
       inset: 0;
-      background: linear-gradient(180deg, #FFF5E6 0%, #F5E6D3 100%);
+      background: rgba(255, 255, 255, 0.4);
+      backdrop-filter: blur(15px);
+      -webkit-backdrop-filter: blur(15px);
       display: flex;
       flex-direction: column;
       font-family: 'Inter', system-ui, sans-serif;
+    }
+
+    /* Solid White Base Background */
+    body.modern-ui {
+      background: #FFFFFF !important;
     }
 
     /* Top Bar with floating icons */
@@ -1016,13 +1023,18 @@
       height: auto;
       min-height: 20vh;
       padding: 1.5rem;
-      background: white;
+      background: rgba(255, 255, 255, 0.4);
+      /* Much more transparent */
+      backdrop-filter: blur(25px);
+      /* Intensive glass contrast */
+      -webkit-backdrop-filter: blur(25px);
       border-radius: 2rem 2rem 0 0;
-      box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+      box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.1);
       margin-top: -8rem;
       /* Overlap more to keep avatar "inside" the card area */
       position: relative;
       z-index: 10;
+      border: 1px solid rgba(255, 255, 255, 0.3);
     }
 
     .chat-container {
@@ -1036,10 +1048,13 @@
     /* Input Field */
     .chat-input-wrapper {
       position: relative;
-      background: #F8F8F8;
+      background: rgba(255, 255, 255, 0.5);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
       border-radius: 1.5rem;
       padding: 0.75rem 1.25rem;
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.2);
     }
 
     .chat-input {
@@ -1056,11 +1071,12 @@
       color: #999;
     }
 
-    /* CREATE Button */
+    /* CREATE Button -> CHAT Button */
     .create-button {
       width: 100%;
       padding: 1rem;
-      background: linear-gradient(135deg, #FFB4A2 0%, #FF9B82 100%);
+      background: #000000;
+      /* Solid Black */
       color: white;
       border: none;
       border-radius: 1.5rem;
@@ -1068,16 +1084,18 @@
       font-weight: 600;
       cursor: pointer;
       transition: all 0.3s ease;
-      box-shadow: 0 4px 12px rgba(255, 155, 130, 0.3);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 0.5rem;
+      letter-spacing: 0.05em;
     }
 
     .create-button:hover {
       transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(255, 155, 130, 0.4);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+      background: #1a1a1a;
     }
 
     .create-button:active {
@@ -6176,11 +6194,10 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
     <div class="chat-section">
       <div class="chat-container">
         <div class="chat-input-wrapper">
-          <input type="text" class="chat-input" id="modern-chat-input"
-            placeholder="Tell us what you'd like to create..." autocomplete="off" />
+          <input type="text" class="chat-input" id="modern-chat-input" placeholder="" autocomplete="off" />
         </div>
         <button class="create-button" id="modern-send-button">
-          <span>CREATE</span>
+          <span>CHAT</span>
           <span>✨</span>
         </button>
       </div>
