@@ -67,7 +67,7 @@ export const site = {
     'OneKnee': { url: "oneknee", fi: 'Polvi' },
     'TwoKnees': { url: "kneel", fi: 'Polvet' },
     'Bend': { url: "bend", fi: 'Perä' },
-    'Sitting': { url:"sitting", fi: 'Istuva' },
+    'Sitting': { url: "sitting", fi: 'Istuva' },
     'Dance': { url: './poses/dance.fbx', fi: 'Tanssi' }
   },
 
@@ -98,9 +98,10 @@ export const site = {
 
   // Background ambient sounds/music
   music: {
-    'Murmur': { url: './audio/murmur.mp3', fi: 'Puheensorina'}
+    'Murmur': { url: './audio/murmur.mp3', fi: 'Puheensorina' }
   }
 
-  ,clerkPublishableKey: 'pk_test_YnVzeS1vc3ByZXktMjcuY2xlcmsuYWNjb3VudHMuZGV2JA' // Set your Clerk publishable key here to enable auth gating
+  , clerkPublishableKey: 'pk_test_YnVzeS1vc3ByZXktMjcuY2xlcmsuYWNjb3VudHMuZGV2JA' // Set your Clerk publishable key here to enable auth gating
+  , elevenLabsAgentId: 'agent_4301kderfhq4f8a910em90ts2wwe' // Set your ElevenLabs Conversational AI Agent ID here
 
 };

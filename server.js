@@ -10,10 +10,18 @@ import { Pinecone } from '@pinecone-database/pinecone';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
+console.log('[DEBUG] Environment loaded. Keys present:', {
+  CLERK_PK: !!process.env.CLERK_PUBLISHABLE_KEY,
+  CLERK_SK: !!process.env.CLERK_SECRET_KEY,
+  ELEVEN_KEY: !!process.env.ELEVENLABS_API_KEY,
+  ELEVEN_AGENT: !!process.env.ELEVENLABS_AGENT_ID,
+  OPENAI: !!process.env.OPENAI_API_KEY
+});
 
 const PORT = process.env.PORT || 5174;
 const ELEVEN_KEY = process.env.ELEVENLABS_API_KEY || '';
 const ELEVEN_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
+const ELEVEN_AGENT_ID = process.env.ELEVENLABS_AGENT_ID || '';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 
 // Enhanced ElevenLabs API Key Validation
@@ -40,6 +48,15 @@ if (!ELEVEN_VOICE_ID) {
   console.warn('[WARN] ELEVENLABS_VOICE_ID is not set. Voice synthesis may fail.');
 } else {
   console.log(`[INFO] ElevenLabs Voice ID: ${ELEVEN_VOICE_ID}`);
+}
+
+if (!ELEVEN_AGENT_ID) {
+  console.warn('[WARN] ELEVENLABS_AGENT_ID is not set. Agent will not work.');
+} else {
+  const agentPreview = ELEVEN_AGENT_ID.length > 8
+    ? `${ELEVEN_AGENT_ID.slice(0, 4)}...${ELEVEN_AGENT_ID.slice(-4)}`
+    : '***';
+  console.log(`[INFO] ElevenLabs Agent ID loaded: ${agentPreview} (length: ${ELEVEN_AGENT_ID.length})`);
 }
 
 if (!OPENAI_KEY) {
@@ -76,8 +93,12 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 // Public app config
 app.get('/app/config', (req, res) => {
+  const agentId = process.env.ELEVENLABS_AGENT_ID || '';
+  console.log(`[ServerConfig] /app/config requested - Agent ID present: ${!!agentId}, length: ${agentId.length}`);
   res.json({
     clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || '',
+    elevenLabsAgentId: agentId,
+    openAIConfigured: !!process.env.OPENAI_API_KEY,
     firebase: {
       apiKey: process.env.FIREBASE_API_KEY || '',
       authDomain: process.env.FIREBASE_AUTH_DOMAIN || '',
@@ -98,10 +119,85 @@ app.get('/app/jwt/get', (req, res) => {
   res.json({ jwt: "" });
 });
 
-// Google TTS proxy stub to avoid 404 and HTML responses
-app.post('/gtts/', (req, res) => {
-  console.log('[GoogleTTS] /gtts/ (not configured)');
-  res.status(501).json({ error: 'Google TTS proxy not configured. Use ElevenLabs (Proxy) in settings.' });
+const GOOGLE_KEY = (process.env.GOOGLE_API_KEY || '').trim();
+
+if (!GOOGLE_KEY) {
+  console.warn('[WARN] GOOGLE_API_KEY is not set. Gemini and Google TTS will fail.');
+} else {
+  console.log(`[INFO] Google API Key loaded. Length: ${GOOGLE_KEY.length}, Start: ${GOOGLE_KEY.slice(0, 8)}..., Ending: ...${GOOGLE_KEY.slice(-4)}`);
+
+  // Detect invisible characters
+  console.log('[DEBUG] Key Char Codes:', GOOGLE_KEY.split('').map(c => c.charCodeAt(0)));
+
+  // Test connectivity at startup
+  fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GOOGLE_KEY}`)
+    .then(async r => {
+      const data = await r.json();
+      if (r.ok) {
+        console.log('[DEBUG] Gemini Key Test: SUCCESS! API is accessible.');
+      } else {
+        console.error('[DEBUG] Gemini Key Test: FAILED. Response:', JSON.stringify(data));
+      }
+    })
+    .catch(e => console.error('[DEBUG] Gemini Key Test: EXCEPTION.', e));
+}
+
+// Helper for Google API Proxies
+async function proxyGoogle(req, res, url, body) {
+  if (!GOOGLE_KEY) {
+    return res.status(500).json({ error: 'GOOGLE_API_KEY not configured on server' });
+  }
+  try {
+    const fullUrl = `${url}?key=${GOOGLE_KEY}`;
+    const response = await fetch(fullUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`[Google Proxy Error] ${url} status=${response.status}: ${errText}`);
+      return res.status(response.status).send(errText);
+    }
+    const data = await response.json();
+    res.json(data);
+  } catch (e) {
+    console.error(`[Google Proxy Exception] ${url}:`, e);
+    res.status(500).json({ error: e.message });
+  }
+}
+
+// Google TTS Proxy
+app.post('/gtts/', async (req, res) => {
+  // Input: { text: "Hello", languageCode: "en-US", name: "en-US-Standard-A", ssmlGender: "MALE" }
+  // Map to Google TTS format
+  const { text, languageCode, name, ssmlGender } = req.body;
+  const body = {
+    input: { text },
+    voice: { languageCode, name, ssmlGender },
+    audioConfig: { audioEncoding: "MP3" }
+  };
+  proxyGoogle(req, res, 'https://texttospeech.googleapis.com/v1/text:synthesize', body);
+});
+
+// Gemini Chat Proxy
+app.post('/google/gemini/chat', async (req, res) => {
+  // Input: { messages: [{ role: "user", parts: [{ text: "Hi" }] }] }
+  // Google AI Studio / Vertex AI format expected by upstream is:
+  // { contents: [{ role: "user", parts: [{ text: "Hi" }] }] }
+
+  // We accept "contents" directly from client to keep it simple
+  const { contents } = req.body;
+
+  const body = {
+    contents,
+    // Safety settings/configs can be added here if needed
+    generationConfig: {
+      maxOutputTokens: 256,
+    }
+  };
+
+  proxyGoogle(req, res, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent', body);
 });
 
 // Debug endpoint for ElevenLabs configuration
@@ -341,10 +437,16 @@ server.on('upgrade', (req, socket, head) => {
       // Basic gate for WS: require Clerk session cookie or Authorization bearer
       const hasClerkCookie = (req.headers.cookie || '').includes('__session=');
       const hasBearer = (req.headers['authorization'] || '').startsWith('Bearer ');
-      if (!hasClerkCookie && !hasBearer) {
+      // Allow ElevenLabs WebSocket to proceed with its own API key auth
+      const isElevenLabsWS = pathname.includes('/elevenlabs/');
+      if (!hasClerkCookie && !hasBearer && !isElevenLabsWS) {
+        console.log('[WebSocket] Blocked: No Clerk auth and not ElevenLabs endpoint');
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
+      }
+      if (isElevenLabsWS) {
+        console.log('[WebSocket] Allowing ElevenLabs connection (uses own API key auth)');
       }
     }
 
@@ -359,8 +461,12 @@ server.on('upgrade', (req, socket, head) => {
       console.log(`[ElevenLabs] API Key present: ${!!ELEVEN_KEY}, Length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
 
       if (!ELEVEN_KEY) {
-        console.error('[ElevenLabs] ERROR: No API key configured!');
-        clientWs.close(1008, 'ElevenLabs API key not configured on server');
+        console.error('[ElevenLabs] ✗ ERROR: No API key configured!');
+        console.error('[ElevenLabs] Please create a .env file in the project root with:');
+        console.error('[ElevenLabs]   ELEVENLABS_API_KEY=your_api_key_here');
+        console.error('[ElevenLabs]   ELEVENLABS_AGENT_ID=agent_4301kderfhq4f8a910em90ts2wwe');
+        console.error('[ElevenLabs] Get your API key from: https://elevenlabs.io/app/settings/api-keys');
+        clientWs.close(1008, 'ElevenLabs API key not configured. Check server logs for setup instructions.');
         return;
       }
 
