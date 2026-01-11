@@ -2171,22 +2171,20 @@ Output JSON Only:
                 }
                 break;
               case 'agent_response':
-                // ElevenLabs Agent format: { type: 'agent_response', agent_response_event: { text: '...' } }
-                const agentText = msg.agent_response_event?.text || msg.agent_response?.text;
+                // ElevenLabs Agent format: { type: 'agent_response', agent_response_event: { agent_response: '...' } }
+                // Note: The structure might be agent_response_event.agent_response OR agent_response_event.text depending on API version
+                const agentText = msg.agent_response_event?.agent_response || msg.agent_response_event?.text || msg.agent_response?.text;
                 console.log('[ElevenLabsConvAI] Agent response:', agentText);
                 if (this.onMessageCallback) this.onMessageCallback(agentText, 'agent');
                 break;
               case 'user_transcript':
-                // ElevenLabs Agent format: { type: 'user_transcript', user_transcript_event: { text: '...' } }
-                const userText = msg.user_transcript_event?.text || msg.user_transcript?.text;
+                // ElevenLabs Agent format: { type: 'user_transcript', user_transcript_event: { user_transcript: '...' } }
+                const userText = msg.user_transcript_event?.user_transcript || msg.user_transcript_event?.text || msg.user_transcript?.text;
                 console.log('[ElevenLabsConvAI] User transcript:', userText);
                 if (this.onMessageCallback) this.onMessageCallback(userText, 'user');
                 break;
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabsConvAI] Conversation initiated:', msg.conversation_initiation_metadata_event);
-                break;
-              case 'ping':
-                // Ping messages are keep-alive, can be ignored
                 break;
               case 'interruption':
                 console.log('[ElevenLabsConvAI] Interruption detected');
@@ -2231,23 +2229,50 @@ Output JSON Only:
         };
       }
 
-      sendText(text) {
+      async sendText(text) {
         if (!this.socket || this.socket.readyState !== 1) {
           console.warn('[ElevenLabsConvAI] Socket not ready, connecting...');
-          this.connect().then(() => {
-            this.socket.onopen = () => {
-              this._sendTextInternal(text);
-            };
-          });
-          return;
+          try {
+            await this.connect();
+            // Wait a small moment for socket to be truly ready if needed, 
+            // though connect() should generally be enough if it awaits open.
+            // But since connect() above only creates the socket, we need to wait for OPEN.
+            await this._waitForOpen();
+          } catch (e) {
+            console.error('[ElevenLabsConvAI] Failed to connect:', e);
+            return;
+          }
         }
         this._sendTextInternal(text);
       }
 
+      _waitForOpen() {
+        return new Promise((resolve, reject) => {
+          if (this.socket.readyState === 1) return resolve();
+
+          const maxWait = 5000;
+          const start = Date.now();
+
+          const interval = setInterval(() => {
+            if (this.socket.readyState === 1) {
+              clearInterval(interval);
+              resolve();
+            } else if (this.socket.readyState === 3) {
+              clearInterval(interval);
+              reject(new Error('Socket closed while waiting to open'));
+            } else if (Date.now() - start > maxWait) {
+              clearInterval(interval);
+              reject(new Error('Timeout waiting for socket open'));
+            }
+          }, 100);
+        });
+      }
+
       _sendTextInternal(text) {
+        console.log('[ElevenLabsConvAI] _sendTextInternal (user_message):', text);
         const msg = {
-          type: "user_input",
-          user_input: text
+          type: "user_message",
+          text: text
         };
         this.socket.send(JSON.stringify(msg));
       }

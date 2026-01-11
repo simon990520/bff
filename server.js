@@ -452,80 +452,82 @@ server.on('upgrade', (req, socket, head) => {
 
     // Upgrade client connection
     wss.handleUpgrade(req, socket, head, (clientWs) => {
-      // Map local path to ElevenLabs API path
       const upstreamPath = pathname.replace('/elevenlabs/', '/');
       const upstreamUrl = `wss://api.elevenlabs.io${upstreamPath}${url.search}`;
 
-      // Connect to ElevenLabs upstream with enhanced logging
-      console.log(`[ElevenLabs] Connecting to: ${upstreamUrl}`);
-      console.log(`[ElevenLabs] API Key present: ${!!ELEVEN_KEY}, Length: ${ELEVEN_KEY ? ELEVEN_KEY.length : 0}`);
+      console.log(`[ElevenLabs] New Session: ${upstreamUrl}`);
 
       if (!ELEVEN_KEY) {
-        console.error('[ElevenLabs] ✗ ERROR: No API key configured!');
-        console.error('[ElevenLabs] Please create a .env file in the project root with:');
-        console.error('[ElevenLabs]   ELEVENLABS_API_KEY=your_api_key_here');
-        console.error('[ElevenLabs]   ELEVENLABS_AGENT_ID=agent_4301kderfhq4f8a910em90ts2wwe');
-        console.error('[ElevenLabs] Get your API key from: https://elevenlabs.io/app/settings/api-keys');
-        clientWs.close(1008, 'ElevenLabs API key not configured. Check server logs for setup instructions.');
+        clientWs.close(1008, 'ElevenLabs API key missing');
         return;
       }
 
+      const clientOrigin = req.headers.origin || `https://${req.headers.host}` || 'https://api.elevenlabs.io';
       const upstream = new WebSocket(upstreamUrl, {
         headers: {
           'xi-api-key': ELEVEN_KEY,
-          'origin': 'https://api.elevenlabs.io',
+          'origin': clientOrigin,
         }
       });
 
-      // Buffer for messages from client -> upstream
-      let clientMsgBuffer = [];
+      const clientMsgBuffer = [];
 
-      // Log connection state changes
       upstream.on('open', () => {
-        console.log('[ElevenLabs] ✓ WebSocket connection established');
-        // Flush buffer
+        console.log('[ElevenLabs] ✓ Upstream Connected');
         while (clientMsgBuffer.length > 0) {
           const { data, isBinary } = clientMsgBuffer.shift();
-          console.log('[ElevenLabs] Flushing buffered message to upstream');
-          upstream.send(data, { binary: isBinary });
+          if (isBinary) upstream.send(data, { binary: true });
+          else upstream.send(data);
         }
       });
 
-      // Data from upstream -> client
       upstream.on('message', (data, isBinary) => {
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary });
+        // --- DRASTIC FIX: Handle Pings on Server side ---
+        if (!isBinary) {
+          try {
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'ping' && msg.ping_event?.event_id) {
+              const pong = JSON.stringify({ type: 'pong', event_id: msg.ping_event.event_id });
+              upstream.send(pong);
+              // console.log('[ElevenLabs] Pong auto-sent');
+              // Don't necessarily need to forward ping to client, but we can for debugging
+            }
+          } catch (e) { }
+        }
+
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(data, { binary: isBinary });
+        }
       });
+
       upstream.on('close', (code, reason) => {
+        console.log(`[ElevenLabs] Upstream closed: ${code} ${reason}`);
         if (clientWs.readyState === WebSocket.OPEN) clientWs.close(code, reason);
       });
+
       upstream.on('error', (err) => {
-        console.error('[ElevenLabs upstream error] Full error:', err);
-        console.error('[ElevenLabs upstream error] Message:', err.message);
-        console.error('[ElevenLabs upstream error] URL attempted:', upstreamUrl);
-
-        // Check for specific error types
-        if (err.message.includes('403')) {
-          console.error('[ElevenLabs] ✗ 403 Forbidden - API key authentication failed');
-        }
-
-        try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream error'); } catch { }
+        console.error('[ElevenLabs] Upstream Error:', err.message);
+        try { if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Upstream Error'); } catch { }
       });
 
-      // Data from client -> upstream
       clientWs.on('message', (data, isBinary) => {
+        const payload = isBinary ? data : data.toString();
         if (upstream.readyState === WebSocket.OPEN) {
-          upstream.send(data, { binary: isBinary });
+          if (isBinary) upstream.send(payload, { binary: true });
+          else upstream.send(payload);
         } else {
-          console.log('[ElevenLabs] Upstream not ready, buffering client message');
-          clientMsgBuffer.push({ data, isBinary });
+          clientMsgBuffer.push({ data: payload, isBinary });
         }
       });
+
       clientWs.on('close', () => {
+        console.log('[ElevenLabs] Client disconnected');
         try { if (upstream.readyState === WebSocket.OPEN) upstream.close(); } catch { }
       });
+
       clientWs.on('error', (err) => {
-        console.error('[Client WS error]', err.message);
-        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(1011, 'Client error'); } catch { }
+        console.error('[ElevenLabs] Client WS Error:', err.message);
+        try { if (upstream.readyState === WebSocket.OPEN) upstream.close(); } catch { }
       });
     });
   } catch (err) {
