@@ -3060,12 +3060,21 @@
       }
     }
 
-    // Audio / Lip-Sync Diagnostic & Manual Fallback
+    // Audio / Lip-Sync Diagnostic & Advanced Manual Fallback
     let audioMonitorActive = false;
+    let smoothedMouth = 0;
+    let smoothedJaw = 0;
+    let smoothedO = 0;
+    let smoothedI = 0;
+
     function startAudioMonitor() {
       if (audioMonitorActive) return;
       audioMonitorActive = true;
-      console.log('[MONITOR] Audio volume monitor started');
+      console.log('[MONITOR] Advanced fluid lip-sync monitor started');
+
+      function lerp(start, end, amt) {
+        return (1 - amt) * start + amt * end;
+      }
 
       function checkVolume() {
         if (!window.head || !window.head.audioAnalyzerNode) {
@@ -3077,30 +3086,59 @@
         const dataArray = new Uint8Array(analyzer.frequencyBinCount);
         analyzer.getByteFrequencyData(dataArray);
 
-        let max = 0;
-        // Check standard speech frequencies
-        for (let i = 0; i < 20; i++) {
-          if (dataArray[i] > max) max = dataArray[i];
-        }
+        let low = 0, mid = 0, high = 0;
 
-        if (max > 20) {
-          // Diagnostic log (throttled)
-          if (Math.random() > 0.95) console.log('[MONITOR] Vol detectado:', max);
+        // Low bands (general energy, jaw)
+        for (let i = 0; i < 15; i++) low = Math.max(low, dataArray[i]);
+        // Mid bands (vowels like AA, O)
+        for (let i = 15; i < 40; i++) mid = Math.max(mid, dataArray[i]);
+        // High bands (tight sounds, I, E)
+        for (let i = 40; i < 100; i++) high = Math.max(high, dataArray[i]);
 
-          // MANUAL JAW FALLBACK
-          // If the internal audio lipsync is failing, we force mouth movement here.
-          // normalize to 0-1 range
-          const mouthVal = (max / 255) * 1.5; // boost for visibility
-          const cappedVal = Math.min(1, mouthVal);
+        const isSpeaking = window.head.isSpeaking || low > 30 || mid > 30;
 
-          // TalkingHead morph targets for "aa" and "mouthOpen"
-          window.head.setValue('viseme_aa', cappedVal);
-          window.head.setValue('mouthOpen', cappedVal * 0.5);
+        if (isSpeaking) {
+          // Targets normalized to 0-1
+          const targetMouth = Math.min(1.0, (low / 255) * 1.6);
+          const targetO = high > mid ? 0 : Math.min(0.8, (mid / 255) * 1.2);
+          const targetI = mid > low ? 0 : Math.min(0.6, (high / 255) * 1.5);
+
+          // Smoothing factors (Attack is fast, Decay is slow)
+          const mouthAlpha = targetMouth > smoothedMouth ? 0.35 : 0.15;
+          const jawAlpha = targetMouth > smoothedJaw ? 0.25 : 0.12;
+
+          smoothedMouth = lerp(smoothedMouth, targetMouth, mouthAlpha);
+          smoothedJaw = lerp(smoothedJaw, targetMouth * 0.5, jawAlpha);
+          smoothedO = lerp(smoothedO, targetO, 0.2);
+          smoothedI = lerp(smoothedI, targetI, 0.2);
+
+          // Apply with subtle jitter for "life"
+          const jitter = (Math.random() - 0.5) * 0.05;
+
+          window.head.setValue('viseme_aa', Math.max(0, smoothedMouth + jitter));
+          window.head.setValue('mouthOpen', Math.max(0, smoothedJaw));
+          window.head.setValue('viseme_O', Math.max(0, smoothedO));
+          window.head.setValue('viseme_I', Math.max(0, smoothedI));
+
+          // Log occasionally
+          if (Math.random() > 0.99) console.log('[MONITOR] Fluid Move:', { mouth: smoothedMouth.toFixed(2), jaw: smoothedJaw.toFixed(2) });
         } else {
-          // Reset when silent
-          if (window.head.isSpeaking) {
+          // Graceful return to zero
+          smoothedMouth = lerp(smoothedMouth, 0, 0.1);
+          smoothedJaw = lerp(smoothedJaw, 0, 0.1);
+          smoothedO = lerp(smoothedO, 0, 0.1);
+          smoothedI = lerp(smoothedI, 0, 0.1);
+
+          if (smoothedMouth > 0.01) {
+            window.head.setValue('viseme_aa', smoothedMouth);
+            window.head.setValue('mouthOpen', smoothedJaw);
+            window.head.setValue('viseme_O', smoothedO);
+            window.head.setValue('viseme_I', smoothedI);
+          } else if (window.head.isSpeaking) {
             window.head.setValue('viseme_aa', 0);
             window.head.setValue('mouthOpen', 0);
+            window.head.setValue('viseme_O', 0);
+            window.head.setValue('viseme_I', 0);
           }
         }
 
