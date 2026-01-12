@@ -1956,6 +1956,7 @@
               lipsyncType: 'audio'
             }).then(() => {
               console.log('[ElevenLabsConvAI] Stream started successfully');
+              if (typeof startAudioMonitor === 'function') startAudioMonitor();
             }).catch((e) => {
               console.error('[ElevenLabsConvAI] Error starting stream:', e);
             });
@@ -1977,6 +1978,8 @@
                   window.head.streamStart({
                     sampleRate: 16000,
                     lipsyncType: 'audio'
+                  }).then(() => {
+                    if (typeof startAudioMonitor === 'function') startAudioMonitor();
                   });
                 }
                 window.head.streamAudio({ audio: event.data });
@@ -2032,11 +2035,13 @@
                     lipsyncType: 'audio'
                   }).then(() => {
                     console.log('[ElevenLabsConvAI] Stream started, processing audio chunk');
+                    if (typeof startAudioMonitor === 'function') startAudioMonitor();
                     this._processAudioChunk(audioChunk);
                   }).catch((e) => {
                     console.error('[ElevenLabsConvAI] Error starting stream:', e);
                   });
                 } else {
+                  if (typeof startAudioMonitor === 'function') startAudioMonitor();
                   this._processAudioChunk(audioChunk);
                 }
                 break;
@@ -3053,6 +3058,55 @@
         console.log(`[MOTION] Playing pose: ${pose}`);
         if (window.head) window.head.playPose(site.poses[pose].url, progressUpdate, site.poses[pose].dur || 60);
       }
+    }
+
+    // Audio / Lip-Sync Diagnostic & Manual Fallback
+    let audioMonitorActive = false;
+    function startAudioMonitor() {
+      if (audioMonitorActive) return;
+      audioMonitorActive = true;
+      console.log('[MONITOR] Audio volume monitor started');
+
+      function checkVolume() {
+        if (!window.head || !window.head.audioAnalyzerNode) {
+          if (audioMonitorActive) requestAnimationFrame(checkVolume);
+          return;
+        }
+
+        const analyzer = window.head.audioAnalyzerNode;
+        const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+        analyzer.getByteFrequencyData(dataArray);
+
+        let max = 0;
+        // Check standard speech frequencies
+        for (let i = 0; i < 20; i++) {
+          if (dataArray[i] > max) max = dataArray[i];
+        }
+
+        if (max > 20) {
+          // Diagnostic log (throttled)
+          if (Math.random() > 0.95) console.log('[MONITOR] Vol detectado:', max);
+
+          // MANUAL JAW FALLBACK
+          // If the internal audio lipsync is failing, we force mouth movement here.
+          // normalize to 0-1 range
+          const mouthVal = (max / 255) * 1.5; // boost for visibility
+          const cappedVal = Math.min(1, mouthVal);
+
+          // TalkingHead morph targets for "aa" and "mouthOpen"
+          window.head.setValue('viseme_aa', cappedVal);
+          window.head.setValue('mouthOpen', cappedVal * 0.5);
+        } else {
+          // Reset when silent
+          if (window.head.isSpeaking) {
+            window.head.setValue('viseme_aa', 0);
+            window.head.setValue('mouthOpen', 0);
+          }
+        }
+
+        if (audioMonitorActive) requestAnimationFrame(checkVolume);
+      }
+      checkVolume();
     }
 
     // Build outgoing message for OpenAI
