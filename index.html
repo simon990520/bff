@@ -1261,18 +1261,13 @@
 
       async storeMemory(mem) {
         if (!mem || !mem.text || !window.Clerk?.user) return;
-
         const vector = await this.getEmbedding(mem.text);
         if (!vector) return;
-
         const token = await jwtGet();
         const namespace = `user_${window.Clerk.user.id}_avatar_default`;
-
         let finalId = 'mem_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
         let finalMetadata = { type: 'general', importance: 0.5, ...mem, timestamp: Date.now() };
-
         try {
-          // Check for existing similar memory (Deduplication)
           const checkRes = await fetch('/app/memory/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
@@ -1280,29 +1275,16 @@
           });
           const checkData = await checkRes.json();
           const bestMatch = (checkData.matches || [])[0];
-
           if (bestMatch && bestMatch.score > 0.85) {
-            console.log('[BFF] Consolidating memory:', mem.text, '(Match:', bestMatch.metadata.text, ')');
-            finalId = bestMatch.id; // Overwrite existing record
+            finalId = bestMatch.id;
             const oldImportance = parseFloat(bestMatch.metadata.importance || 0.5);
-            finalMetadata = {
-              ...bestMatch.metadata,
-              ...mem,
-              importance: Math.min(1.0, oldImportance + 0.15), // Increase importance
-              timestamp: Date.now()
-            };
-          } else {
-            console.log('[BFF] Storing new memory:', mem.text);
+            finalMetadata = { ...bestMatch.metadata, ...mem, importance: Math.min(1.0, oldImportance + 0.15), timestamp: Date.now() };
           }
         } catch (e) { console.warn('[BFF] Deduplication check failed', e); }
-
         await fetch('/app/memory/upsert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-          body: JSON.stringify({
-            namespace,
-            vectors: [{ id: finalId, values: vector, metadata: finalMetadata }]
-          })
+          body: JSON.stringify({ namespace, vectors: [{ id: finalId, values: vector, metadata: finalMetadata }] })
         }).catch(e => console.error(e));
       },
 
@@ -1310,65 +1292,31 @@
         if (!window.Clerk?.user || !queryText) return [];
         const vector = await this.getEmbedding(queryText);
         if (!vector) return [];
-
         try {
           const token = await jwtGet();
           const res = await fetch('/app/memory/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({
-              namespace: `user_${window.Clerk.user.id}_avatar_default`,
-              vector: vector,
-              topK: 4 // Top 4 relevant memories
-            })
+            body: JSON.stringify({ namespace: `user_${window.Clerk.user.id}_avatar_default`, vector: vector, topK: 4 })
           });
           const data = await res.json();
-          return (data.matches || []).filter(m => m.score > 0.35); // Filter by relevance
+          return (data.matches || []).filter(m => m.score > 0.35);
         } catch (e) { console.error(e); return []; }
       },
 
-      // --- Evolution Engine ---
       async evolve(lastMessages) {
         if (!this.db || !this.profile || !this.avatarProfile) return;
-
         const payload = {
           model: "gpt-4o-mini",
           messages: [
             {
               role: "system",
-              content: `You are the BFF Evolution Engine. 
-Your goal: Analyze the conversation and update the User Profile, Avatar Psychological State, and Extract Long-Term Memories.
-
-CURRENT USER PROFILE: ${JSON.stringify(this.profile)}
-CURRENT AVATAR STATE: ${JSON.stringify(this.avatarProfile)}
-
-TASKS:
-1. EXTRACT DATA: Detect new user info (Name, Age, Location, Likes/Dislikes).
-2. MEMORY EXTRACTION: Extract important facts/events to remember forever (Rule: Ignore small talk). 
-   - Example: "I love cats", "I failed my exam", "My mom is sick". 
-   - Store as 'memories' list with 'text', 'type' (event/preference/fact), and 'importance' (0.0-1.0).
-3. UPDATE STATS:
-   - 'trustLevel' (User->Avatar): 0.0-1.0
-   - 'attachmentToUser' (Avatar->User): 0.0-1.0
-   - 'emotionalBaseline': Update mood.
-4. ONBOARDING: Set 'onboardingComplete': true if Name is known.
-
-OUTPUT FORMAT (JSON Only):
-{
-  "userUpdates": { ... },
-  "avatarUpdates": { ... },
-  "memories": [ { "text": "...", "type": "preference", "importance": 0.9, "emotion": "joy" } ]
-}
-Respond ONLY with valid JSON.`
+              content: `You are the BFF Evolution Engine. Update User Profile and Avatar State.\nCURRENT USER: ${JSON.stringify(this.profile)}\nCURRENT AVATAR: ${JSON.stringify(this.avatarProfile)}`
             },
-            {
-              role: "user",
-              content: `Conversation:\n${JSON.stringify(lastMessages.slice(-4))}`
-            }
+            { role: "user", content: `Conversation:\n${JSON.stringify(lastMessages.slice(-4))}` }
           ],
           response_format: { type: "json_object" }
         };
-
         try {
           const token = await jwtGet();
           const res = await fetch("/openai/v1/chat/completions", {
@@ -1379,143 +1327,70 @@ Respond ONLY with valid JSON.`
           const data = await res.json();
           if (data.choices && data.choices[0].message.content) {
             const updates = JSON.parse(data.choices[0].message.content);
-            console.log('[BFF] Evolution updates:', updates);
-
-            if (updates.userUpdates && Object.keys(updates.userUpdates).length) {
-              const uRef = ref(this.db, `users/${window.Clerk.user.id}/profile`);
-              update(uRef, updates.userUpdates);
-            }
-            if (updates.avatarUpdates && Object.keys(updates.avatarUpdates).length) {
-              const aRef = ref(this.db, `avatars/default/profile`);
-              update(aRef, updates.avatarUpdates);
-            }
-            // Memory Storage
-            if (updates.memories && Array.isArray(updates.memories)) {
-              for (const mem of updates.memories) {
-                if (mem.importance > 0.4) await this.storeMemory(mem);
-              }
-            }
+            if (updates.userUpdates) update(ref(this.db, `users/${window.Clerk.user.id}/profile`), updates.userUpdates);
+            if (updates.avatarUpdates) update(ref(this.db, `avatars/default/profile`), updates.avatarUpdates);
+            if (updates.memories) for (const mem of updates.memories) if (mem.importance > 0.4) await this.storeMemory(mem);
           }
-        } catch (e) {
-          console.warn('[BFF] Evolution failed', e);
-        }
+        } catch (e) { console.warn('[BFF] Evolution failed', e); }
       },
-      // --- Emotional Engine ---
+
       emotionalEngine: {
         currentEmotion: 'neutral',
         intensity: 0.5,
         affectionLevel: 0.2,
         trustWithUser: 0.2,
 
-        async analyze(userMessage, history = []) {
+        async analyze(messageText, history = []) {
           console.log('[BFF] Emotional Analysis triggered...');
+          if (!window.serverConfig?.openAIConfigured && !d3.select("#apikey-openai").property("value")) {
+            return { currentMood: 'neutral', pose: 'Straight', gesture: null };
+          }
+
           const payload = {
             model: "gpt-4o-mini",
             messages: [
               {
                 role: "system",
-                content: `You are the BFF Emotional Engine. 
-Determine the avatar's emotional state based on the user's message, sentiment, and relationship history.
-Allowed moods: neutral, happy, angry, sad, fear, disgust, love, sleep.
-
-Psychological Rules:
-- HAPPY: High joy, excitement, success, or positive user feedback.
-- ANGRY: Conflict, disrespect, high frustration, or defensiveness.
-- SAD: Loneliness, failure, depression, or deep vulnerability.
-- FEAR: Anxiety, worry, danger, or being overwhelmed.
-- DISGUST: Repulsion, dislike, or strong disagreement.
-- LOVE: Deep affection, trust, shared milestones, or romantic/deep-friendship signals.
-- SLEEP: Night time (if known), boredom, extreme exhaustion, or meditative calm.
-- NEUTRAL: Everyday talk, providing information, or standard friendly interaction.
-
-Current State: ${this.currentEmotion} (Intensity: ${this.intensity})
-User Trust: ${this.trustWithUser} Affection: ${this.affectionLevel}
-
-Output JSON Only:
-{
-  "currentEmotion": "neutral/happy/angry/sad/fear/disgust/love/sleep",
-  "intensity": 0.1-1.0,
-  "confidence": 0.1-1.0,
-  "affectionDelta": -0.1 to 0.1,
-  "trustDelta": -0.1 to 0.1,
-  "reasoning": "short explanation"
-}`
+                content: `You are the BFF Emotional Engine. Determine mood, pose, and gesture.
+                ALLOWED MOODS: neutral, happy, angry, sad, fear, disgust, love, sleep.
+                ALLOWED POSES: Straight, Side, Hip, Turn, Back, Wide, OneKnee, TwoKnees, Bend, Sitting.
+                ALLOWED GESTURES: HandUp, OK, Index, ThumbUp, ThumbDown, Side, Shrug, Namaste.
+                Current State: Mood=${this.currentEmotion}, Trust=${this.trustWithUser}, Affection=${this.affectionLevel}
+                Output JSON: { "currentMood": "...", "pose": "...", "gesture": "...", "intensity": 0.5, "affectionDelta": 0, "trustDelta": 0 }`
               },
-              {
-                role: "user",
-                content: `History: ${JSON.stringify(history.slice(-3))}\nUser Message: "${userMessage}"`
-              }
+              { role: "user", content: `History: ${JSON.stringify(history.slice(-3))}\nMessage: "${messageText}"` }
             ],
             response_format: { type: "json_object" }
           };
 
           try {
-            // Check if OpenAI is configured on server
-            if (!window.serverConfig?.openAIConfigured) {
-              // Silent fallback - no log warning because this is expected state
-              return {
-                currentEmotion: 'neutral',
-                intensity: 0.5,
-                confidence: 0.3,
-                affectionDelta: 0,
-                trustDelta: 0,
-                reasoning: 'OpenAI not available (Default)'
-              };
-            }
-
-            const token = await jwtGet();
-            const res = await fetch("/openai/v1/chat/completions", {
+            const token = d3.select("#apikey-openai").property("value") || await jwtGet();
+            const res = await fetch(openaiChatCompletionsProxy, {
               method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
               body: JSON.stringify(payload)
             });
-
-            // Handle 401 or other errors gracefully
-            if (!res.ok) {
-              if (res.status === 401) {
-                console.warn('[BFF] Emotional analysis unavailable (OpenAI not configured), using default emotion');
-              } else {
-                console.warn(`[BFF] Emotional analysis failed with status ${res.status}, using default emotion`);
-              }
-              // Return default emotion instead of failing
-              return {
-                currentEmotion: 'neutral',
-                intensity: 0.5,
-                confidence: 0.3,
-                affectionDelta: 0,
-                trustDelta: 0,
-                reasoning: 'OpenAI not configured, using default neutral emotion'
-              };
-            }
-
             const data = await res.json();
             if (data.choices && data.choices[0].message.content) {
               const result = JSON.parse(data.choices[0].message.content);
-              console.log('[BFF] Analysis result:', result);
-
-              this.currentEmotion = this.normalizeMood(result.currentEmotion);
-              this.intensity = result.intensity;
+              this.currentEmotion = this.normalizeMood(result.currentMood);
+              this.intensity = result.intensity || 0.5;
               this.affectionLevel = Math.max(0, Math.min(1, this.affectionLevel + (result.affectionDelta || 0)));
               this.trustWithUser = Math.max(0, Math.min(1, this.trustWithUser + (result.trustDelta || 0)));
 
               if (window.head) {
-                window.head.setMood(this.currentEmotion);
+                if (typeof motion === 'function') {
+                  motion(null, result.pose, result.gesture, this.currentEmotion);
+                } else {
+                  window.head.setMood(this.currentEmotion);
+                }
               }
               return result;
             }
           } catch (e) {
-            console.warn('[BFF] Emotional analysis error, using default:', e.message);
-            // Return default emotion on any error
-            return {
-              currentEmotion: 'neutral',
-              intensity: 0.5,
-              confidence: 0.3,
-              affectionDelta: 0,
-              trustDelta: 0,
-              reasoning: 'Analysis failed, using default neutral emotion'
-            };
+            console.warn('[BFF] Analysis failed', e);
           }
-          return null;
+          return { currentMood: 'neutral', pose: 'Straight', gesture: null };
         },
 
         normalizeMood(mood) {
@@ -1528,39 +1403,17 @@ Output JSON Only:
       async diagnose() {
         console.group('🔍 BFF Memory Diagnostic');
         try {
-          // 1. Check Auth
           const token = await jwtGet();
-          console.log('🔹 Auth Token:', token ? 'OK' : 'MISSING');
-          if (!token) throw new Error("No Auth Token (Login first)");
-
-          // 2. Check OpenAI Embeddings
-          console.log('🔹 Checking OpenAI Embeddings...');
           const vector = await this.getEmbedding("test");
-          console.log('✅ Embedding Result:', vector ? `OK (Vector Length: ${vector.length})` : 'FAILED');
-          if (!vector) throw new Error("Embedding Generation Failed. Check OPENAI_API_KEY");
-
-          // 3. Check Pinecone Connection (Query)
-          console.log('🔹 Pinging Pinecone (Query)...');
+          if (!vector) throw new Error("Embedding Failed");
           const res = await fetch('/app/memory/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({
-              namespace: `user_${window.Clerk?.user?.id || 'anon'}_avatar_default`,
-              vector: vector,
-              topK: 1
-            })
+            body: JSON.stringify({ namespace: `user_${window.Clerk?.user?.id || 'anon'}_avatar_default`, vector, topK: 1 })
           });
           const data = await res.json();
-          if (data.error) throw new Error("Pinecone Error: " + data.error);
-          console.log('✅ Pinecone Connection:', 'OK (Matches found: ' + (data.matches?.length || 0) + ')');
-
-          console.log('🎉 DIAGNOSTIC PASSED: System is connected.');
-          alert('✅ Diagnóstico Exitoso: Pinecone está conectado y respondiendo.\n\nTodo funciona correctamente.');
-
-        } catch (e) {
-          console.error('❌ DIAGNOSTIC FAILED:', e);
-          alert('❌ Error en Diagnóstico: ' + e.message + '\n\nAbre la consola (F12) para ver el error exacto.');
-        }
+          alert('✅ Diagnóstico Exitoso');
+        } catch (e) { alert('❌ Diagnóstico Falló: ' + e.message); }
         console.groupEnd();
       }
     };
@@ -2100,7 +1953,7 @@ Output JSON Only:
             console.log('[ElevenLabsConvAI] Starting TalkingHead stream with sample rate 16000 Hz...');
             window.head.streamStart({
               sampleRate: 16000,
-              lipsyncType: 'visemes'
+              lipsyncType: 'audio'
             }).then(() => {
               console.log('[ElevenLabsConvAI] Stream started successfully');
             }).catch((e) => {
@@ -2123,7 +1976,7 @@ Output JSON Only:
                   console.log('[ElevenLabsConvAI] Starting stream for binary audio (16kHz)...');
                   window.head.streamStart({
                     sampleRate: 16000,
-                    lipsyncType: 'visemes'
+                    lipsyncType: 'audio'
                   });
                 }
                 window.head.streamAudio({ audio: event.data });
@@ -2176,7 +2029,7 @@ Output JSON Only:
                   console.log('[ElevenLabsConvAI] Starting stream with sample rate 16000 Hz...');
                   window.head.streamStart({
                     sampleRate: 16000, // ElevenLabs Conversational AI default sample rate
-                    lipsyncType: 'visemes'
+                    lipsyncType: 'audio'
                   }).then(() => {
                     console.log('[ElevenLabsConvAI] Stream started, processing audio chunk');
                     this._processAudioChunk(audioChunk);
@@ -2189,16 +2042,25 @@ Output JSON Only:
                 break;
               case 'agent_response':
                 // ElevenLabs Agent format: { type: 'agent_response', agent_response_event: { agent_response: '...' } }
-                // Note: The structure might be agent_response_event.agent_response OR agent_response_event.text depending on API version
                 const agentText = msg.agent_response_event?.agent_response || msg.agent_response_event?.text || msg.agent_response?.text;
                 console.log('[ElevenLabsConvAI] Agent response:', agentText);
                 if (this.onMessageCallback) this.onMessageCallback(agentText, 'agent');
+
+                // Trigger emotional analysis on agent response to act out what it says
+                if (agentText && window.BFF?.emotionalEngine) {
+                  window.BFF.emotionalEngine.analyze(agentText);
+                }
                 break;
               case 'user_transcript':
                 // ElevenLabs Agent format: { type: 'user_transcript', user_transcript_event: { user_transcript: '...' } }
                 const userText = msg.user_transcript_event?.user_transcript || msg.user_transcript_event?.text || msg.user_transcript?.text;
                 console.log('[ElevenLabsConvAI] User transcript:', userText);
                 if (this.onMessageCallback) this.onMessageCallback(userText, 'user');
+
+                // Trigger emotional analysis on user message to react visually
+                if (userText && window.BFF?.emotionalEngine) {
+                  window.BFF.emotionalEngine.analyze(userText);
+                }
                 break;
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabsConvAI] Conversation initiated:', msg.conversation_initiation_metadata_event);
@@ -3174,16 +3036,22 @@ Output JSON Only:
     }
 
     function motion(action, pose, gesture, mood) {
+      console.log(`[MOTION] Triggered: action=${action}, pose=${pose}, gesture=${gesture}, mood=${mood}`);
       try {
-        head.setMood(mood || 'neutral');
+        if (window.head) {
+          window.head.setMood(mood || 'neutral');
+        }
       } catch (err) { }
       if (gesture && site.gestures[gesture]) {
-        head.playGesture(site.gestures[gesture].name);
+        console.log(`[MOTION] Playing gesture: ${site.gestures[gesture].name}`);
+        if (window.head) window.head.playGesture(site.gestures[gesture].name);
       }
       if (action && site.animations[action]) {
-        head.playAnimation(site.animations[action].url, progressUpdate, site.animations[action].dur || 20);
+        console.log(`[MOTION] Playing animation: ${action}`);
+        if (window.head) window.head.playAnimation(site.animations[action].url, progressUpdate, site.animations[action].dur || 20);
       } else if (pose && site.poses[pose]) {
-        head.playPose(site.poses[pose].url, progressUpdate, site.poses[pose].dur || 60);
+        console.log(`[MOTION] Playing pose: ${pose}`);
+        if (window.head) window.head.playPose(site.poses[pose].url, progressUpdate, site.poses[pose].dur || 60);
       }
     }
 
@@ -8750,20 +8618,6 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
         recognition.onerror = (e) => console.error('[STT] Error:', e);
         recognition.start();
       }
-
-      // Inject Mic Button
-      setTimeout(() => {
-        const btnFn = document.getElementById('modern-send-button');
-        if (btnFn && !document.getElementById('google-mic-btn')) {
-          const mic = document.createElement('button');
-          mic.id = 'google-mic-btn';
-          mic.innerHTML = '🎤';
-          mic.style.cssText = "margin-left:10px; padding:10px; cursor:pointer; background:#444; color:white; border:none; border-radius:50%; width:40px; height:40px; font-size:20px;";
-          mic.onclick = startGoogleListening;
-          btnFn.parentNode.insertBefore(mic, btnFn);
-          console.log('[UI] Mic button injected');
-        }
-      }, 1000);
 
       // Initialize audio on first interaction
       let audioInitialized = false;
