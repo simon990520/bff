@@ -5539,6 +5539,13 @@ Goals: ${p.goals ? p.goals.join(', ') : 'Unknown'}
         };
       } catch (e) { console.warn('Failed to patch speakText routing', e); }
 
+      // Load 3D Room Background
+      try {
+        head.loadRoom('./room/room1.glb');
+      } catch (e) {
+        console.error("Failed to load room:", e);
+      }
+
       // Follow double clicks
       document.body.addEventListener('dblclick', function (e) {
         e = e || window.event;
