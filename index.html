@@ -1953,10 +1953,9 @@
             console.log('[ElevenLabsConvAI] Starting TalkingHead stream with sample rate 16000 Hz...');
             window.head.streamStart({
               sampleRate: 16000,
-              lipsyncType: 'audio'
+              lipsyncType: 'words'
             }).then(() => {
               console.log('[ElevenLabsConvAI] Stream started successfully');
-              if (typeof startAudioMonitor === 'function') startAudioMonitor();
             }).catch((e) => {
               console.error('[ElevenLabsConvAI] Error starting stream:', e);
             });
@@ -1977,9 +1976,8 @@
                   console.log('[ElevenLabsConvAI] Starting stream for binary audio (16kHz)...');
                   window.head.streamStart({
                     sampleRate: 16000,
-                    lipsyncType: 'audio'
+                    lipsyncType: 'words'
                   }).then(() => {
-                    if (typeof startAudioMonitor === 'function') startAudioMonitor();
                   });
                 }
                 window.head.streamAudio({ audio: event.data });
@@ -2032,16 +2030,14 @@
                   console.log('[ElevenLabsConvAI] Starting stream with sample rate 16000 Hz...');
                   window.head.streamStart({
                     sampleRate: 16000, // ElevenLabs Conversational AI default sample rate
-                    lipsyncType: 'audio'
+                    lipsyncType: 'words'
                   }).then(() => {
                     console.log('[ElevenLabsConvAI] Stream started, processing audio chunk');
-                    if (typeof startAudioMonitor === 'function') startAudioMonitor();
                     this._processAudioChunk(audioChunk);
                   }).catch((e) => {
                     console.error('[ElevenLabsConvAI] Error starting stream:', e);
                   });
                 } else {
-                  if (typeof startAudioMonitor === 'function') startAudioMonitor();
                   this._processAudioChunk(audioChunk);
                 }
                 break;
@@ -2050,6 +2046,9 @@
                 const agentText = msg.agent_response_event?.agent_response || msg.agent_response_event?.text || msg.agent_response?.text;
                 console.log('[ElevenLabsConvAI] Agent response:', agentText);
                 if (this.onMessageCallback) this.onMessageCallback(agentText, 'agent');
+
+                // Store agent text for lip-sync
+                this.currentAgentText = agentText;
 
                 // Trigger emotional analysis on agent response to act out what it says
                 if (agentText && window.BFF?.emotionalEngine) {
@@ -2181,7 +2180,19 @@
           const audioBuffer = window.head.b64ToArrayBuffer(audioChunk);
           console.log('[ElevenLabsConvAI] Converted audio chunk, size:', audioBuffer.byteLength, 'bytes');
 
-          window.head.streamAudio({ audio: audioBuffer });
+          // Prepare stream data
+          const streamData = { audio: audioBuffer };
+
+          // Add words for lip-sync if available
+          if (this.currentAgentText) {
+            streamData.words = this.currentAgentText.split(/\s+/);
+            streamData.wtimes = streamData.words.map((_, i) => i * 300); // Approximate timing
+            streamData.wdurations = streamData.words.map(w => w.length * 80); // Approximate duration
+            console.log('[ElevenLabsConvAI] Sending', streamData.words.length, 'words for lip-sync');
+            this.currentAgentText = null; // Clear after use
+          }
+
+          window.head.streamAudio(streamData);
           console.log('[ElevenLabsConvAI] Audio sent to streamAudio successfully');
         } catch (e) {
           console.error('[ElevenLabsConvAI] Error processing audio chunk:', e);
