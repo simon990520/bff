@@ -2055,8 +2055,9 @@ Output JSON Only:
 
     // ElevenLabs Conversational AI Agent
     class ElevenLabsConvAI {
-      constructor(agentId) {
+      constructor(agentId, voiceId = '') {
         this.agentId = agentId;
+        this.voiceId = voiceId;
         this.socket = null;
         this.isSpeaking = false;
         this.onMessageCallback = null;
@@ -2075,23 +2076,36 @@ Output JSON Only:
 
         this.socket.onopen = () => {
           console.log('[ElevenLabsConvAI] WebSocket OPEN');
+
+          // Send voice overrides if configured or defaults for better quality
+          const overrides = {
+            type: "conversation_config_override",
+            conversation_config_override: {
+              agent: {
+                tts: {
+                  voice_id: this.voiceId || undefined,
+                  stability: 0.7, // Higher stability for more "normal" voice
+                  similarity_boost: 0.75,
+                  speed: 0.9 // Slower speed for more "natural" feel
+                }
+              }
+            }
+          };
+          console.log('[ElevenLabsConvAI] Sending overrides:', overrides);
+          this.socket.send(JSON.stringify(overrides));
+
           if (this.onConversationStart) this.onConversationStart();
 
-          // Start TalkingHead streaming if head is available
-          // ElevenLabs Agent uses 24000 Hz sample rate by default
-          // If not available yet, it will be started when first audio arrives
           if (window.head) {
-            console.log('[ElevenLabsConvAI] Starting TalkingHead stream with sample rate 24000 Hz...');
+            console.log('[ElevenLabsConvAI] Starting TalkingHead stream with sample rate 16000 Hz...');
             window.head.streamStart({
-              sampleRate: 24000, // ElevenLabs Conversational AI default sample rate
-              lipsyncType: 'visemes' // Use visemes for lip-sync
+              sampleRate: 16000,
+              lipsyncType: 'visemes'
             }).then(() => {
-              console.log('[ElevenLabsConvAI] Stream started successfully, isStreaming:', window.head.isStreaming);
+              console.log('[ElevenLabsConvAI] Stream started successfully');
             }).catch((e) => {
               console.error('[ElevenLabsConvAI] Error starting stream:', e);
             });
-          } else {
-            console.warn('[ElevenLabsConvAI] window.head not available yet, will start stream when audio arrives');
           }
         };
 
@@ -2106,8 +2120,11 @@ Output JSON Only:
               console.log('[ElevenLabsConvAI] Binary message received, size:', event.data.byteLength || event.data.size);
               if (window.head && event.data instanceof ArrayBuffer) {
                 if (!window.head.isStreaming) {
-                  console.log('[ElevenLabsConvAI] Starting stream for binary audio...');
-                  window.head.streamStart();
+                  console.log('[ElevenLabsConvAI] Starting stream for binary audio (16kHz)...');
+                  window.head.streamStart({
+                    sampleRate: 16000,
+                    lipsyncType: 'visemes'
+                  });
                 }
                 window.head.streamAudio({ audio: event.data });
                 console.log('[ElevenLabsConvAI] Binary audio sent to streamAudio');
@@ -2156,9 +2173,9 @@ Output JSON Only:
 
                 // Ensure streaming is started (async)
                 if (!window.head.isStreaming) {
-                  console.log('[ElevenLabsConvAI] Starting stream with sample rate 24000 Hz...');
+                  console.log('[ElevenLabsConvAI] Starting stream with sample rate 16000 Hz...');
                   window.head.streamStart({
-                    sampleRate: 24000, // ElevenLabs Conversational AI default sample rate
+                    sampleRate: 16000, // ElevenLabs Conversational AI default sample rate
                     lipsyncType: 'visemes'
                   }).then(() => {
                     console.log('[ElevenLabsConvAI] Stream started, processing audio chunk');
@@ -2321,19 +2338,17 @@ Output JSON Only:
         // Wait for server config to be loaded
         await window.serverConfigReadyPromise;
 
-        // Get Agent ID from server config first, then fallback to site config
-        const agentId = window.serverConfig?.elevenLabsAgentId || site.elevenLabsAgentId || cfg('voice-eleven-agent-id') || '';
+        // Get IDs from server config
+        const agentId = window.serverConfig?.elevenLabsAgentId || cfg('voice-eleven-agent-id') || '';
+        const voiceId = window.serverConfig?.elevenLabsVoiceId || '';
 
         if (!agentId || agentId === 'ADD_YOUR_AGENT_ID_HERE') {
           console.error('[ElevenLabsConvAI] ERROR: No Agent ID configured!');
-          console.error('[ElevenLabsConvAI] Please set ELEVENLABS_AGENT_ID in .env file');
-          console.error('[ElevenLabsConvAI] Server config:', window.serverConfig);
-          console.error('[ElevenLabsConvAI] Site config:', site.elevenLabsAgentId);
           return;
         }
 
-        console.log('[ElevenLabsConvAI] Initializing with Agent ID:', agentId.substring(0, 8) + '...');
-        elevenConvAI = new ElevenLabsConvAI(agentId);
+        console.log('[ElevenLabsConvAI] Initializing Agent:', agentId.substring(0, 8) + '...', 'Voice:', voiceId || 'Default');
+        elevenConvAI = new ElevenLabsConvAI(agentId, voiceId);
         window.elevenConvAI = elevenConvAI;
       } catch (e) {
         console.error('[ElevenLabsConvAI] Initialization error:', e);

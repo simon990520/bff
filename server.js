@@ -98,6 +98,7 @@ app.get('/app/config', (req, res) => {
   res.json({
     clerkPublishableKey: process.env.CLERK_PUBLISHABLE_KEY || '',
     elevenLabsAgentId: agentId,
+    elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID || '',
     openAIConfigured: !!process.env.OPENAI_API_KEY,
     firebase: {
       apiKey: process.env.FIREBASE_API_KEY || '',
@@ -453,7 +454,13 @@ server.on('upgrade', (req, socket, head) => {
     // Upgrade client connection
     wss.handleUpgrade(req, socket, head, (clientWs) => {
       const upstreamPath = pathname.replace('/elevenlabs/', '/');
-      const upstreamUrl = `wss://api.elevenlabs.io${upstreamPath}${url.search}`;
+
+      // Force output_format=pcm_16000 to avoid "squirrel voice" (sample rate mismatch)
+      const u = new URL(`wss://api.elevenlabs.io${upstreamPath}${url.search}`);
+      if (!u.searchParams.has('output_format')) {
+        u.searchParams.set('output_format', 'pcm_16000');
+      }
+      const upstreamUrl = u.toString();
 
       console.log(`[ElevenLabs] New Session: ${upstreamUrl}`);
 
