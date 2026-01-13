@@ -329,27 +329,37 @@
       left: 50%;
       transform: translate(-50%, -50%);
       background-color: transparent;
+      z-index: 10;
+      pointer-events: none;
+      /* Allow clicks to pass through main container area */
     }
 
     /* Left panel */
     #left {
       position: absolute;
-      margin: 4px;
-      pointer-events: none;
+      margin: 10px;
+      pointer-events: auto;
+      /* Re-enable pointer events for controls */
       background-color: var(--colorPanel);
+      z-index: 20;
+      border-radius: 12px;
+      padding: 10px;
+      backdrop-filter: blur(5px);
     }
 
     #avatar,
     #view {
-      position: absolute;
+      position: fixed;
+      /* Fixed position for full screen */
       opacity: 0;
       top: 0;
       left: 0;
-      right: 0;
-      bottom: 0;
+      width: 100vw;
+      height: 100vh;
       pointer-events: auto;
       overflow: hidden;
-      border-radius: inherit;
+      z-index: 0;
+      /* Background layer */
     }
 
     #view {
@@ -378,6 +388,7 @@
       pointer-events: none;
       font-size: 1rem;
       background-color: transparent;
+      z-index: 50;
     }
 
     #loading-back,
@@ -422,8 +433,14 @@
     /* Right panel */
     #right {
       position: absolute;
-      margin: 4px;
+      margin: 10px;
       background-color: var(--colorPanel);
+      z-index: 20;
+      right: 0;
+      /* Anchor to right */
+      border-radius: 12px;
+      padding: 10px;
+      backdrop-filter: blur(5px);
     }
 
     #right .border {
@@ -912,15 +929,23 @@
     }
 
     /* New App Container */
+    /* Main Desktop/Mobile Container */
     .new-app-container {
       position: fixed;
       inset: 0;
-      background: rgba(255, 255, 255, 0.4);
-      backdrop-filter: blur(15px);
-      -webkit-backdrop-filter: blur(15px);
+      background: transparent;
+      /* Transparent to show 3D room */
+      z-index: 100;
       display: flex;
       flex-direction: column;
       font-family: 'Inter', system-ui, sans-serif;
+      pointer-events: none;
+      /* Ensure clicks pass through empty areas */
+    }
+
+    /* Allow interaction with children */
+    .new-app-container>* {
+      pointer-events: auto;
     }
 
     /* Solid White Base Background */
@@ -989,33 +1014,20 @@
       justify-content: center;
     }
 
-    /* Avatar gets positioned here */
-    body.modern-ui #avatar {
-      position: relative !important;
-      width: 100% !important;
-      height: 100% !important;
-      opacity: 1 !important;
-      border-radius: 0 !important;
-    }
+    /* Avatar style overrides removed to allow full screen */
 
     /* Subtle glow under avatar */
     .avatar-glow {
-      position: absolute;
-      bottom: -20px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 60%;
-      height: 40px;
-      background: radial-gradient(ellipse, rgba(255, 155, 130, 0.2) 0%, transparent 70%);
-      filter: blur(20px);
-      pointer-events: none;
+      display: none;
+      /* Hide glow as we have a full room */
     }
 
     .avatar-wrapper canvas {
-      border-radius: 2rem;
-      filter: drop-shadow(0 0 25px rgba(255, 127, 80, 0.15));
-      max-height: 80vh;
-      /* Allow more height */
+      border-radius: 0;
+      /* Remove border radius */
+      filter: none;
+      max-height: 100vh;
+      width: 100vw;
     }
 
     /* Chat Section - Compact at bottom */
@@ -1023,18 +1035,16 @@
       height: auto;
       min-height: 20vh;
       padding: 1.5rem;
-      background: rgba(255, 255, 255, 0.4);
-      /* Much more transparent */
-      backdrop-filter: blur(25px);
-      /* Intensive glass contrast */
-      -webkit-backdrop-filter: blur(25px);
+      background: rgba(255, 255, 255, 0.1);
+      /* More transparent */
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
       border-radius: 2rem 2rem 0 0;
       box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.1);
       margin-top: -8rem;
-      /* Overlap more to keep avatar "inside" the card area */
       position: relative;
       z-index: 10;
-      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-top: 1px solid rgba(255, 255, 255, 0.2);
     }
 
     .chat-container {
@@ -1114,9 +1124,10 @@
     /* Responsive adjustments */
     @media (min-width: 768px) {
       .new-app-container {
-        max-width: 480px;
-        margin: 0 auto;
-        box-shadow: 0 0 40px rgba(0, 0, 0, 0.1);
+        max-width: none;
+        width: 100%;
+        margin: 0;
+        box-shadow: none;
       }
     }
   </style>

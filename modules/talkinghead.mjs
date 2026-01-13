@@ -1435,6 +1435,22 @@ class TalkingHead {
     this.setMood(this.avatar.avatarMood || this.moodName || this.opt.avatarMood);
     this.start();
 
+    // Restore camera state from localStorage if available
+    try {
+      const savedState = localStorage.getItem('th_camera_state');
+      if (savedState) {
+        const state = JSON.parse(savedState);
+        if (state.position && state.target && this.controls) {
+          this.camera.position.fromArray(state.position);
+          this.controls.target.fromArray(state.target);
+          this.controls.update();
+          console.log("Restored camera state from persistence.");
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to restore camera state", e);
+    }
+
   }
 
   /**
@@ -1582,6 +1598,55 @@ class TalkingHead {
       this.renderer.setSize(this.nodeAvatar.clientWidth, this.nodeAvatar.clientHeight);
       this.controls.update();
       this.render();
+    }
+  }
+
+  /**
+  * Update camera for smart zoom and persist state.
+  */
+  updateCamera() {
+    if (!this.controls || !this.objectHead) return;
+
+    // --- Smart Zoom Logic ---
+    const dist = this.camera.position.distanceTo(this.controls.target);
+
+    // Zoom Thresholds
+    const minZoom = 0.5; // Very close
+    const maxZoom = 1.5; // Normal body view
+
+    let desiredTarget;
+
+    if (dist < minZoom + 0.2) {
+      // If very close, LOCK to head to prevent clipping/looking at neck
+      desiredTarget = this.objectHead.getWorldPosition(new THREE.Vector3());
+    } else if (dist > maxZoom) {
+      // Far away: target hips
+      desiredTarget = this.objectHips.getWorldPosition(new THREE.Vector3());
+      desiredTarget.y += 0.4;
+    } else {
+      // Interpolate
+      const alpha = 1 - (dist - minZoom) / (maxZoom - minZoom);
+      const hipsPos = this.objectHips.getWorldPosition(new THREE.Vector3());
+      hipsPos.y += 0.4;
+      const headPos = this.objectHead.getWorldPosition(new THREE.Vector3());
+      desiredTarget = new THREE.Vector3().lerpVectors(hipsPos, headPos, alpha);
+    }
+
+    // Smoothly transition
+    this.controls.target.lerp(desiredTarget, 0.1);
+
+    // --- Persistence Logic ---
+    // Save state every 60 frames (approx 1 sec) or so to avoid spamming localStorage
+    if (!this.frameCounter) this.frameCounter = 0;
+    this.frameCounter++;
+
+    if (this.frameCounter % 60 === 0) {
+      const state = {
+        position: this.camera.position.toArray(),
+        target: this.controls.target.toArray()
+      };
+      // Only save if meaningful
+      localStorage.setItem('th_camera_state', JSON.stringify(state));
     }
   }
 
@@ -2700,6 +2765,7 @@ class TalkingHead {
       this.mixer.update(dt / 1000 * this.mixer.timeScale);
     }
     this.updatePoseDelta();
+    this.updateCamera();
 
 
     // Volume based head movement, set targets
@@ -2741,6 +2807,9 @@ class TalkingHead {
 
     // Update Dynamic Bones
     this.dynamicbones.update(dt);
+
+    // Smart Zoom: Adjust camera target based on distance
+    this.updateCamera();
 
     // Custom update
     if (this.opt.update) {
